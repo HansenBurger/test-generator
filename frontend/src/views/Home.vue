@@ -177,17 +177,6 @@
         </div>
       </template>
     </el-dialog>
-
-    <!-- 错误提示 -->
-    <el-alert
-      v-if="errorMessage"
-      :title="errorMessage"
-      type="error"
-      :closable="true"
-      @close="errorMessage = ''"
-      show-icon
-      class="error-alert"
-    />
   </div>
 </template>
 
@@ -205,7 +194,6 @@ const parsedDataList = ref([]) // 存储多个文件的解析结果（用于调�
 const previewDataList = ref([]) // 预览数据列表（用于弹窗显示）
 const previewDialogVisible = ref(false) // 预览弹窗显示状态
 const previewError = ref('') // 预览错误信息
-const errorMessage = ref('')
 const hasProcessed = ref(false) // 是否已处理过文件
 const processingFiles = ref([]) // 正在处理的文件列表
 const currentProcessingIndex = ref(0) // 当前处理的文件索引
@@ -224,7 +212,6 @@ const processingProgress = computed(() => {
 
 const processingStatus = computed(() => {
   if (loading.value || generating.value) return null
-  if (errorMessage.value) return 'exception'
   return 'success'
 })
 
@@ -307,12 +294,15 @@ const handleParseAndGenerate = async () => {
   processingFiles.value = validFiles
   previewDataList.value = []
   previewError.value = ''
-  errorMessage.value = ''
   currentProcessingIndex.value = 0
   pendingFiles.value = []
 
   // 逐个解析文件，显示预览
   loading.value = true
+  let hasError = false
+  let firstErrorFile = ''
+  let firstErrorMessage = ''
+  
   for (let i = 0; i < validFiles.length; i++) {
     currentProcessingIndex.value = i
     const file = validFiles[i].raw || validFiles[i]
@@ -336,17 +326,62 @@ const handleParseAndGenerate = async () => {
         data: response.data
       })
     } catch (error) {
-      previewError.value = `${previewError.value ? previewError.value + '\n' : ''}${validFiles[i].name}: ${error.message || '解析失败'}`
-      ElMessage.error(`${validFiles[i].name} 解析失败: ${error.message || '解析失败'}`)
+      // 记录第一个错误
+      if (!hasError) {
+        hasError = true
+        firstErrorFile = validFiles[i].name
+        firstErrorMessage = error.message || '解析失败'
+      }
+      
+      // 如果发生错误，立即停止处理其他文件
+      break
     }
   }
 
   loading.value = false
 
-  // 如果有解析成功的文件，显示预览弹窗
-  if (previewDataList.value.length > 0) {
+  // 如果发生错误，清除文件并显示错误信息
+  if (hasError) {
+    // 清空所有状态
+    previewDataList.value = []
+    pendingFiles.value = []
+    hasProcessed.value = false
+    processingFiles.value = []
+    currentProcessingIndex.value = 0
+    
+    // 清除文件列表
+    fileList.value = []
+    if (uploadRef.value) {
+      uploadRef.value.clearFiles()
+    }
+    
+    // 显示错误信息（后端已经格式化为"文件名 解析失败：错误原因"的格式）
+    // 如果后端返回的信息已经包含文件名，直接使用；否则添加文件名
+    let errorMsg = firstErrorMessage
+    if (!errorMsg.includes(firstErrorFile)) {
+      errorMsg = `${firstErrorFile} 解析失败：${firstErrorMessage}`
+    }
+    
+    // 使用 ElMessage 悬浮显示错误信息
+    ElMessage.error({
+      message: errorMsg,
+      duration: 5000, // 5秒后自动消失
+      showClose: true // 显示关闭按钮
+    })
+    
+    // 如果有多个文件，提示其他文件未处理
+    if (validFiles.length > 1) {
+      ElMessage.warning({
+        message: '由于第一个文件解析失败，其他文件已停止处理',
+        duration: 5000,
+        showClose: true
+      })
+    }
+  } else if (previewDataList.value.length > 0) {
+    // 所有文件解析成功，显示预览弹窗
     previewDialogVisible.value = true
   } else {
+    // 没有文件解析成功（理论上不应该到这里，因为hasError会捕获）
     hasProcessed.value = false
     ElMessage.error('所有文件解析失败，请检查文件格式')
   }
@@ -439,7 +474,6 @@ const handleCancel = () => {
   pendingFiles.value = []
   processingFiles.value = []
   currentProcessingIndex.value = 0
-  errorMessage.value = ''
   previewError.value = ''
   loading.value = false
   generating.value = false
@@ -482,10 +516,27 @@ const handleDebug = () => {
 <style scoped>
 .home-container {
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
 }
 
 .upload-card {
   margin-bottom: 20px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+}
+
+/* 确保卡片内容不会超出 */
+:deep(.upload-card .el-card__body) {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .card-header {
@@ -526,6 +577,9 @@ const handleDebug = () => {
   justify-content: center;
   gap: 15px;
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  flex-wrap: wrap;
 }
 
 .preview-card {
@@ -572,10 +626,7 @@ const handleDebug = () => {
   margin: 4px 0;
 }
 
-.error-alert {
-  margin-top: 20px;
-}
-
+/* 错误提示 - 放在卡片内部顶部 */
 .processing-status {
   margin-top: 20px;
   padding: 15px;
