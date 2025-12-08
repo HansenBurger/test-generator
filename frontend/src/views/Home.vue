@@ -99,71 +99,121 @@
           :model-value="[`file-${idx}`]"
         >
           <el-collapse-item :name="`file-${idx}`" :title="`文件 ${idx + 1}: ${item.file}`">
-            <el-descriptions :column="2" border>
-              <el-descriptions-item label="版本编号">
-                {{ item.data.version || '未提取' }}
-              </el-descriptions-item>
-              <el-descriptions-item label="用例名称">
-                {{ item.data.requirement_info?.case_name || '未提取' }}
-              </el-descriptions-item>
-              <el-descriptions-item label="客户（C）">
-                {{ item.data.requirement_info?.customer ?? '未提取' }}
-              </el-descriptions-item>
-              <el-descriptions-item label="产品（P）">
-                {{ item.data.requirement_info?.product ?? '未提取' }}
-              </el-descriptions-item>
-              <el-descriptions-item label="渠道（C）">
-                {{ item.data.requirement_info?.channel ?? '未提取' }}
-              </el-descriptions-item>
-              <el-descriptions-item label="合作方（P）">
-                {{ item.data.requirement_info?.partner ?? '未提取' }}
-              </el-descriptions-item>
-              <el-descriptions-item label="活动数量" :span="2">
-                {{ item.data.activities?.length || 0 }}
-              </el-descriptions-item>
-            </el-descriptions>
+            <!-- 建模需求显示 -->
+            <template v-if="item.data.document_type !== 'non_modeling'">
+              <el-descriptions :column="2" border>
+                <el-descriptions-item label="版本编号">
+                  {{ item.data.version || '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="用例名称">
+                  {{ item.data.requirement_info?.case_name || '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="客户（C）">
+                  {{ item.data.requirement_info?.customer ?? '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="产品（P）">
+                  {{ item.data.requirement_info?.product ?? '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="渠道（C）">
+                  {{ item.data.requirement_info?.channel ?? '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="合作方（P）">
+                  {{ item.data.requirement_info?.partner ?? '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="活动数量" :span="2">
+                  {{ item.data.activities?.length || 0 }}
+                </el-descriptions-item>
+              </el-descriptions>
 
-            <!-- 活动详情 -->
-            <el-collapse 
-              v-if="item.data.activities?.length" 
-              class="activities-collapse"
-              :model-value="getActivityKeys(item.data.activities, idx)"
-            >
-              <el-collapse-item
-                v-for="(activity, index) in item.data.activities"
-                :key="index"
-                :name="`file-${idx}-activity-${index}`"
-                :title="`活动 ${index + 1}: ${activity.name}`"
+              <!-- 活动详情 -->
+              <el-collapse 
+                v-if="item.data.activities?.length" 
+                class="activities-collapse"
+                :model-value="getActivityKeys(item.data.activities, idx)"
               >
-                <div
-                  v-for="(component, cIndex) in activity.components"
-                  :key="cIndex"
-                  class="component-item"
+                <el-collapse-item
+                  v-for="(activity, index) in item.data.activities"
+                  :key="index"
+                  :name="`file-${idx}-activity-${index}`"
+                  :title="`活动 ${index + 1}: ${activity.name}`"
                 >
-                  <h4>组件: {{ component.name }}</h4>
                   <div
-                    v-for="(task, tIndex) in component.tasks"
-                    :key="tIndex"
-                    class="task-item"
+                    v-for="(component, cIndex) in activity.components"
+                    :key="cIndex"
+                    class="component-item"
                   >
-                    <h5>任务: {{ task.name }}</h5>
+                    <h4>组件: {{ component.name }}</h4>
                     <div
-                      v-for="(step, sIndex) in task.steps"
-                      :key="sIndex"
-                      class="step-item"
+                      v-for="(task, tIndex) in component.tasks"
+                      :key="tIndex"
+                      class="task-item"
                     >
-                      <p><strong>步骤:</strong> {{ step.name }}</p>
-                      <p v-if="step.input_elements?.length">
-                        <strong>输入要素:</strong> {{ step.input_elements.length }} 个
-                      </p>
-                      <p v-if="step.output_elements?.length">
-                        <strong>输出要素:</strong> {{ step.output_elements.length }} 个
-                      </p>
+                      <h5>任务: {{ task.name }}</h5>
+                      <div
+                        v-for="(step, sIndex) in task.steps"
+                        :key="sIndex"
+                        class="step-item"
+                      >
+                        <p><strong>步骤:</strong> {{ step.name }}</p>
+                        <p v-if="step.input_elements?.length">
+                          <strong>输入要素:</strong> {{ step.input_elements.length }} 个
+                        </p>
+                        <p v-if="step.output_elements?.length">
+                          <strong>输出要素:</strong> {{ step.output_elements.length }} 个
+                        </p>
+                      </div>
                     </div>
                   </div>
-                </div>
-              </el-collapse-item>
-            </el-collapse>
+                </el-collapse-item>
+              </el-collapse>
+            </template>
+
+            <!-- 非建模需求显示 -->
+            <template v-else>
+              <el-descriptions :column="2" border>
+                <el-descriptions-item label="文档类型">
+                  非建模需求
+                </el-descriptions-item>
+                <el-descriptions-item label="文件编号">
+                  {{ item.data.file_number || '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="文件名称" :span="2">
+                  {{ item.data.file_name || '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="需求名称" :span="2">
+                  {{ item.data.requirement_name || '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="设计者" :span="2">
+                  {{ item.data.designer || '未提取' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="功能数量" :span="2">
+                  {{ item.data.functions?.length || 0 }}
+                </el-descriptions-item>
+              </el-descriptions>
+
+              <!-- 功能详情 -->
+              <el-collapse 
+                v-if="item.data.functions?.length" 
+                class="activities-collapse"
+                :model-value="getFunctionKeys(item.data.functions, idx)"
+              >
+                <el-collapse-item
+                  v-for="(func, index) in item.data.functions"
+                  :key="index"
+                  :name="`file-${idx}-function-${index}`"
+                  :title="`功能 ${index + 1}: ${func.name}`"
+                >
+                  <div class="function-item">
+                    <p v-if="func.input_elements?.length">
+                      <strong>输入要素:</strong> {{ func.input_elements.length }} 个
+                    </p>
+                    <p v-if="func.output_elements?.length">
+                      <strong>输出要素:</strong> {{ func.output_elements.length }} 个
+                    </p>
+                  </div>
+                </el-collapse-item>
+              </el-collapse>
+            </template>
           </el-collapse-item>
         </el-collapse>
       </div>
@@ -408,13 +458,24 @@ const handlePreviewConfirm = async () => {
       const link = document.createElement('a')
       link.href = url
       
-      const caseName = item.data.requirement_info?.case_name || '测试大纲'
-      const version = item.data.version || ''
-      if (version) {
-        link.download = `${caseName}-${version}.xmind`
+      // 根据文档类型生成文件名
+      let filename = '测试大纲.xmind'
+      if (item.data.document_type === 'non_modeling') {
+        // 非建模需求：需求名称-时间戳
+        const requirementName = item.data.requirement_name || '测试大纲'
+        const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_').slice(0, 15)
+        filename = `${requirementName}-${timestamp}.xmind`
       } else {
-        link.download = `${caseName}.xmind`
+        // 建模需求：用例名称-版本号
+        const caseName = item.data.requirement_info?.case_name || '测试大纲'
+        const version = item.data.version || ''
+        if (version) {
+          filename = `${caseName}-${version}.xmind`
+        } else {
+          filename = `${caseName}.xmind`
+        }
       }
+      link.download = filename
       
       document.body.appendChild(link)
       link.click()
@@ -489,6 +550,11 @@ const handleCancel = () => {
 // 获取活动折叠面板的默认展开keys
 const getActivityKeys = (activities, fileIndex) => {
   return activities.map((_, index) => `file-${fileIndex}-activity-${index}`)
+}
+
+// 获取功能折叠面板的默认展开keys
+const getFunctionKeys = (functions, fileIndex) => {
+  return functions.map((_, index) => `file-${fileIndex}-function-${index}`)
 }
 
 // 调试信息

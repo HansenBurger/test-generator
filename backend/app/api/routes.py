@@ -141,13 +141,20 @@ async def generate_outline_from_json(parsed_data: ParsedDocument):
         generator = XMindGenerator(parsed_data)
         xmind_bytes = generator.generate()
         
-        # 生成文件名：用例名称-版本号（处理中文编码）
-        case_name = parsed_data.requirement_info.case_name or "测试大纲"
-        version = parsed_data.version or ""
-        if version:
-            filename = f"{case_name}-{version}.xmind"
+        # 生成文件名
+        if parsed_data.document_type == "non_modeling":
+            # 非建模需求：需求名称-时间戳
+            requirement_name = parsed_data.requirement_name or "测试大纲"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{requirement_name}-{timestamp}.xmind"
         else:
-            filename = f"{case_name}.xmind"
+            # 建模需求：用例名称-版本号
+            case_name = parsed_data.requirement_info.case_name or "测试大纲"
+            version = parsed_data.version or ""
+            if version:
+                filename = f"{case_name}-{version}.xmind"
+            else:
+                filename = f"{case_name}.xmind"
         
         # 对文件名进行URL编码，确保中文正确显示
         import urllib.parse

@@ -57,13 +57,27 @@ class ActivityInfo(BaseModel):
     components: List[ComponentInfo] = []  # 组件列表
 
 
+class FunctionInfo(BaseModel):
+    """功能信息（用于非建模需求）"""
+    name: str  # 功能名称
+    input_elements: List[InputElement] = []  # 输入要素
+    output_elements: List[OutputElement] = []  # 输出要素
+
+
 class ParsedDocument(BaseModel):
     """解析后的文档数据"""
     version: str  # 版本编号
     requirement_info: RequirementInfo  # 需求用例基本信息
-    activities: List[ActivityInfo] = []  # 活动列表
+    activities: List[ActivityInfo] = []  # 活动列表（建模需求）
     document_number: Optional[str] = None  # 需求说明书编号
     case_number: Optional[str] = None  # 需求用例编号
+    # 非建模需求相关字段
+    document_type: Optional[str] = None  # 文档类型："modeling" 或 "non_modeling"
+    file_number: Optional[str] = None  # 文件编号
+    file_name: Optional[str] = None  # 文件名称
+    requirement_name: Optional[str] = None  # 需求名称
+    designer: Optional[str] = None  # 设计者
+    functions: List[FunctionInfo] = []  # 功能列表（非建模需求）
 
 
 class ParseResponse(BaseModel):

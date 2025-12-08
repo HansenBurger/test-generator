@@ -10,7 +10,7 @@ from docx.text.paragraph import Paragraph
 
 from app.models.schemas import (
     ParsedDocument, RequirementInfo, ActivityInfo, ComponentInfo,
-    TaskInfo, StepInfo, InputElement, OutputElement
+    TaskInfo, StepInfo, InputElement, OutputElement, FunctionInfo
 )
 
 
@@ -25,24 +25,62 @@ class DocumentParser:
     
     def parse(self) -> ParsedDocument:
         """解析文档主方法"""
-        # 1. 验证文档类型
-        if not self._validate_document():
-            raise ValueError("非建模类需求文档：未找到'用例版本控制信息'表")
+        # 1. 识别文档类型
+        doc_type = self._identify_document_type()
         
-        # 2. 提取版本编号
+        if doc_type == "modeling":
+            return self._parse_modeling_document()
+        elif doc_type == "non_modeling":
+            return self._parse_non_modeling_document()
+        else:
+            raise ValueError("无法识别文档类型：未找到'用例版本控制信息'表或'文件受控信息'表")
+    
+    def _identify_document_type(self) -> Optional[str]:
+        """识别文档类型：建模需求或非建模需求"""
+        # 优先查找"用例版本控制信息"（建模需求特征）
+        for para in self.paragraphs[:100]:
+            text = para.text.strip()
+            if "用例版本控制信息" in text:
+                # 检查是否有包含"版本"字段的表格
+                for table in self.tables:
+                    if len(table.rows) < 1:
+                        continue
+                    header_row = table.rows[0]
+                    header_text = ' '.join([cell.text.strip() for cell in header_row.cells])
+                    if "版本" in header_text:
+                        return "modeling"
+        
+        # 查找"文件受控信息"（非建模需求特征）
+        for para in self.paragraphs[:100]:
+            text = para.text.strip()
+            if "文件受控信息" in text:
+                # 检查是否有包含"文件编号"或"文件名称"字段的表格
+                for table in self.tables:
+                    if len(table.rows) < 1:
+                        continue
+                    header_row = table.rows[0]
+                    header_text = ' '.join([cell.text.strip() for cell in header_row.cells])
+                    if "文件编号" in header_text or "文件名称" in header_text:
+                        return "non_modeling"
+        
+        return None
+    
+    def _parse_modeling_document(self) -> ParsedDocument:
+        """解析建模需求文档"""
+        # 1. 提取版本编号
         version = self._extract_version()
         if not version:
             raise ValueError("无法提取版本信息：未找到'用例版本控制信息'表或表中无版本数据")
         
-        # 3. 提取需求用例基本信息
+        # 2. 提取需求用例基本信息
         requirement_info = self._extract_requirement_info()
         if not requirement_info.case_name:
             raise ValueError("无法提取需求基本信息：未找到'需求用例概述'表或表中无用例名称")
         
-        # 4. 提取活动名称（从任务设计部分）
+        # 3. 提取活动名称（从任务设计部分）
         activity_name = self._extract_activity_name()
         
-        # 5. 提取组件、任务、步骤信息（从任务规则说明部分）
+        # 4. 提取组件、任务、步骤信息（从任务规则说明部分）
         components = self._extract_all_components()
         
         # 构建活动信息（组件信息放在活动下，但XMind生成时会分别处理）
@@ -54,7 +92,40 @@ class DocumentParser:
         return ParsedDocument(
             version=version,
             requirement_info=requirement_info,
-            activities=[activity] if activity_name or components else []
+            activities=[activity] if activity_name or components else [],
+            document_type="modeling"
+        )
+    
+    def _parse_non_modeling_document(self) -> ParsedDocument:
+        """解析非建模需求文档"""
+        # 1. 提取文件编号和文件名称
+        file_number, file_name = self._extract_file_controlled_info()
+        
+        # 2. 提取需求名称
+        requirement_name = self._extract_requirement_name(file_name)
+        
+        # 3. 提取设计者
+        designer = self._extract_designer()
+        
+        # 4. 提取功能列表
+        functions = self._extract_functions()
+        
+        if not functions:
+            raise ValueError("无法提取功能列表：未找到'功能清单'表或表中无功能数据")
+        
+        # 构建需求基本信息（使用需求名称作为用例名称）
+        requirement_info = RequirementInfo(case_name=requirement_name or "")
+        
+        return ParsedDocument(
+            version=file_number or "",  # 使用文件编号作为版本
+            requirement_info=requirement_info,
+            activities=[],
+            document_type="non_modeling",
+            file_number=file_number,
+            file_name=file_name,
+            requirement_name=requirement_name,
+            designer=designer,
+            functions=functions
         )
     
     def _validate_document(self) -> bool:
@@ -571,3 +642,269 @@ class DocumentParser:
                 if keyword in header:
                     return i
         return -1
+    
+    # ========== 非建模需求解析方法 ==========
+    
+    def _extract_file_controlled_info(self) -> Tuple[Optional[str], Optional[str]]:
+        """从文件受控信息表提取文件编号和文件名称"""
+        file_number = None
+        file_name = None
+        
+        for para in self.paragraphs[:100]:
+            text = para.text.strip()
+            if "文件受控信息" in text:
+                # 查找后续的表格
+                for table in self.tables:
+                    if len(table.rows) < 1:
+                        continue
+                    
+                    header_row = table.rows[0]
+                    headers = [cell.text.strip() for cell in header_row.cells]
+                    
+                    # 查找文件编号和文件名称列
+                    file_number_idx = self._find_column_index(headers, ["文件编号"])
+                    file_name_idx = self._find_column_index(headers, ["文件名称"])
+                    
+                    if file_number_idx >= 0 or file_name_idx >= 0:
+                        # 解析数据行（可能是横向布局：第一行是表头，第二行是值）
+                        if len(table.rows) >= 2:
+                            value_row = table.rows[1]
+                            values = [cell.text.strip() for cell in value_row.cells]
+                            
+                            if file_number_idx >= 0 and file_number_idx < len(values):
+                                file_number = values[file_number_idx]
+                            
+                            if file_name_idx >= 0 and file_name_idx < len(values):
+                                file_name = values[file_name_idx]
+                        
+                        # 也尝试纵向布局：第一列是键，第二列是值
+                        for row in table.rows[1:]:
+                            if len(row.cells) >= 2:
+                                key = row.cells[0].text.strip()
+                                value = row.cells[1].text.strip()
+                                
+                                if value and value != '/':
+                                    if "文件编号" in key and not file_number:
+                                        file_number = value
+                                    elif "文件名称" in key and not file_name:
+                                        file_name = value
+                        
+                        if file_number or file_name:
+                            return file_number, file_name
+        
+        return file_number, file_name
+    
+    def _extract_requirement_name(self, file_name: Optional[str]) -> Optional[str]:
+        """提取需求名称
+        方案一（主）：从文件名称中提取核心功能名
+        方案二（备）：从功能清单第一项提取
+        """
+        # 方案一：从文件名称提取
+        if file_name:
+            # 正则模式：大信贷系统(.+?)业务需求说明书
+            match = re.search(r"大信贷系统(.+?)业务需求说明书", file_name)
+            if match:
+                requirement_name = match.group(1).strip()
+                # 清理处理：去除括号内容
+                requirement_name = re.sub(r"（[^）]*）", "", requirement_name)
+                requirement_name = re.sub(r"\([^)]*\)", "", requirement_name)
+                requirement_name = requirement_name.strip()
+                if requirement_name:
+                    return requirement_name
+        
+        # 方案二：从功能清单第一项提取
+        functions = self._extract_function_list()
+        if functions:
+            return functions[0]
+        
+        return None
+    
+    def _extract_designer(self) -> Optional[str]:
+        """从文件信息表提取设计者（作者）"""
+        for para in self.paragraphs[:100]:
+            text = para.text.strip()
+            if "文件信息" in text:
+                # 查找后续的表格
+                for table in self.tables:
+                    if len(table.rows) < 1:
+                        continue
+                    
+                    header_row = table.rows[0]
+                    headers = [cell.text.strip() for cell in header_row.cells]
+                    
+                    # 查找作者列
+                    author_idx = self._find_column_index(headers, ["作者"])
+                    
+                    if author_idx >= 0:
+                        # 解析数据行
+                        if len(table.rows) >= 2:
+                            value_row = table.rows[1]
+                            values = [cell.text.strip() for cell in value_row.cells]
+                            
+                            if author_idx < len(values):
+                                designer = values[author_idx]
+                                if designer and designer != '/':
+                                    return designer
+                        
+                        # 也尝试纵向布局
+                        for row in table.rows[1:]:
+                            if len(row.cells) >= 2:
+                                key = row.cells[0].text.strip()
+                                value = row.cells[1].text.strip()
+                                
+                                if "作者" in key and value and value != '/':
+                                    return value
+        
+        return None
+    
+    def _extract_function_list(self) -> List[str]:
+        """提取功能清单（仅功能名称列表）"""
+        functions = []
+        
+        # 查找"5.1 功能清单"章节
+        for i, para in enumerate(self.paragraphs):
+            text = para.text.strip()
+            
+            # 查找"5 功能*（A阶段）"或"5.1 功能清单"
+            if ("功能" in text and "（A阶段）" in text) or "功能清单" in text:
+                # 查找后续的表格
+                for table in self.tables:
+                    if len(table.rows) < 2:
+                        continue
+                    
+                    header_row = table.rows[0]
+                    headers = [cell.text.strip() for cell in header_row.cells]
+                    
+                    # 查找"业务功能名称"列
+                    function_name_idx = self._find_column_index(headers, ["业务功能名称", "功能名称"])
+                    
+                    if function_name_idx >= 0:
+                        # 解析数据行
+                        for row in table.rows[1:]:
+                            if len(row.cells) > function_name_idx:
+                                function_name = row.cells[function_name_idx].text.strip()
+                                if function_name and function_name not in functions:
+                                    functions.append(function_name)
+                        
+                        if functions:
+                            return functions
+        
+        return functions
+    
+    def _extract_functions(self) -> List[FunctionInfo]:
+        """提取功能列表（包含输入输出要素）"""
+        functions = []
+        
+        # 1. 先提取功能名称列表
+        function_names = self._extract_function_list()
+        
+        if not function_names:
+            return functions
+        
+        # 2. 为每个功能提取详细输入输出要素
+        for function_name in function_names:
+            input_elements, output_elements = self._extract_function_input_output(function_name)
+            
+            function = FunctionInfo(
+                name=function_name,
+                input_elements=input_elements,
+                output_elements=output_elements
+            )
+            functions.append(function)
+        
+        return functions
+    
+    def _extract_function_input_output(self, function_name: str) -> Tuple[List[InputElement], List[OutputElement]]:
+        """提取指定功能的输入输出要素"""
+        input_elements = []
+        output_elements = []
+        
+        # 查找"5.2 功能说明"下的对应功能章节
+        function_section_index = -1
+        
+        for i, para in enumerate(self.paragraphs):
+            text = para.text.strip()
+            
+            # 查找"5.2 功能说明"或"功能说明"
+            if "功能说明" in text and ("5.2" in text or "（A阶段）" in text):
+                # 在该章节下查找功能名称（三级标题）
+                for j in range(i + 1, min(i + 200, len(self.paragraphs))):
+                    next_para = self.paragraphs[j]
+                    next_text = next_para.text.strip()
+                    
+                    # 如果遇到下一个一级或二级标题，停止搜索
+                    if self._is_heading(next_para, level=1) or self._is_heading(next_para, level=2):
+                        if "功能说明" not in next_text:
+                            break
+                    
+                    # 检查是否是三级标题且匹配功能名称
+                    if self._is_heading(next_para, level=3):
+                        # 模糊匹配功能名称（允许标点符号差异）
+                        cleaned_title = re.sub(r"[^\w\u4e00-\u9fa5]", "", next_text)
+                        cleaned_function = re.sub(r"[^\w\u4e00-\u9fa5]", "", function_name)
+                        
+                        if cleaned_function in cleaned_title or cleaned_title in cleaned_function:
+                            function_section_index = j
+                            break
+                
+                if function_section_index >= 0:
+                    break
+        
+        if function_section_index < 0:
+            return input_elements, output_elements
+        
+        # 在功能章节内查找输入输出要素
+        # 查找结束位置（下一个三级标题、二级标题或一级标题）
+        end_index = len(self.paragraphs)
+        for i in range(function_section_index + 1, len(self.paragraphs)):
+            para = self.paragraphs[i]
+            if (self._is_heading(para, level=3) or 
+                self._is_heading(para, level=2) or 
+                self._is_heading(para, level=1)):
+                end_index = i
+                break
+        
+        # 在功能章节内查找"输入要素"和"输出要素"
+        found_input_text = False
+        found_output_text = False
+        
+        for i in range(function_section_index + 1, end_index):
+            para = self.paragraphs[i]
+            text = para.text.strip()
+            
+            # 查找"输入要素"文本
+            if ("输入要素" in text or ("输入" in text and "要素" in text)) and not found_input_text:
+                found_input_text = True
+                # 查找第一个未使用的输入要素表
+                for table_idx, table in enumerate(self.tables):
+                    if table_idx in self.used_tables:
+                        continue
+                    if len(table.rows) < 2:
+                        continue
+                    first_row_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
+                    if "输入" in first_row_text and "字段名称" in first_row_text:
+                        parsed = self._parse_input_table(table)
+                        if parsed:
+                            input_elements = parsed
+                            self.used_tables.add(table_idx)
+                            break
+            
+            # 查找"输出要素"文本
+            if ("输出要素" in text or ("输出" in text and "要素" in text)) and not found_output_text:
+                found_output_text = True
+                # 查找第一个未使用的输出要素表
+                for table_idx, table in enumerate(self.tables):
+                    if table_idx in self.used_tables:
+                        continue
+                    if len(table.rows) < 2:
+                        continue
+                    first_row_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
+                    if ("字段名称" in first_row_text and "类型" in first_row_text and 
+                        "是否必输" not in first_row_text and "数据来源" not in first_row_text):
+                        parsed = self._parse_output_table(table)
+                        if parsed:
+                            output_elements = parsed
+                            self.used_tables.add(table_idx)
+                            break
+        
+        return input_elements, output_elements

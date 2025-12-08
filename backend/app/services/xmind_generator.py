@@ -65,25 +65,30 @@ class XMindGenerator:
         children = ET.SubElement(topic, 'children')
         topics_container = ET.SubElement(children, 'topics', {'type': 'attached'})
         
-        # 1. 添加基础信息（固定节点）
-        basic_info_topic = self._create_topic_element(topics_container, '基础信息')
-        self._add_basic_info(basic_info_topic)
-        
-        # 2. 添加活动名称（如果有）
-        if self.parsed_doc.activities:
-            for activity in self.parsed_doc.activities:
-                if activity and activity.name:
-                    activity_topic = self._create_topic_element(topics_container, activity.name)
-                    self._add_activity_fixed_nodes(activity_topic)
-        
-        # 3. 添加组件名称（如果有）
-        if self.parsed_doc.activities:
-            for activity in self.parsed_doc.activities:
-                if activity and activity.components:
-                    for component in activity.components:
-                        if component and component.name:
-                            component_topic = self._create_topic_element(topics_container, component.name)
-                            self._add_component(component_topic, component)
+        # 根据文档类型生成不同的结构
+        if self.parsed_doc.document_type == "non_modeling":
+            self._add_non_modeling_structure(topics_container)
+        else:
+            # 建模需求结构
+            # 1. 添加基础信息（固定节点）
+            basic_info_topic = self._create_topic_element(topics_container, '基础信息')
+            self._add_basic_info(basic_info_topic)
+            
+            # 2. 添加活动名称（如果有）
+            if self.parsed_doc.activities:
+                for activity in self.parsed_doc.activities:
+                    if activity and activity.name:
+                        activity_topic = self._create_topic_element(topics_container, activity.name)
+                        self._add_activity_fixed_nodes(activity_topic)
+            
+            # 3. 添加组件名称（如果有）
+            if self.parsed_doc.activities:
+                for activity in self.parsed_doc.activities:
+                    if activity and activity.components:
+                        for component in activity.components:
+                            if component and component.name:
+                                component_topic = self._create_topic_element(topics_container, component.name)
+                                self._add_component(component_topic, component)
         
         # 转换为XML字符串
         ET.indent(root, space='  ')
@@ -143,7 +148,22 @@ class XMindGenerator:
         return topic_elem
     
     def _build_root_title(self) -> str:
-        """构建根节点标题：需求用例名称-版本号"""
+        """构建根节点标题"""
+        # 非建模需求：需求说明书编号-需求名称
+        if self.parsed_doc.document_type == "non_modeling":
+            file_number = self.parsed_doc.file_number or ""
+            requirement_name = self.parsed_doc.requirement_name or ""
+            
+            if file_number and requirement_name:
+                return f"{file_number}-{requirement_name}"
+            elif requirement_name:
+                return requirement_name
+            elif file_number:
+                return f"{file_number}-测试大纲"
+            else:
+                return "测试大纲"
+        
+        # 建模需求：需求用例名称-版本号
         case_name = self.parsed_doc.requirement_info.case_name or ""
         version = self.parsed_doc.version or ""
         
@@ -158,6 +178,18 @@ class XMindGenerator:
     
     def _add_basic_info(self, parent_topic: ET.Element):
         """添加基础信息节点"""
+        # 非建模需求：只显示设计者
+        if self.parsed_doc.document_type == "non_modeling":
+            # 创建children和topics容器
+            children = ET.SubElement(parent_topic, 'children')
+            topics_container = ET.SubElement(children, 'topics', {'type': 'attached'})
+            
+            designer = self.parsed_doc.designer or ""
+            designer_text = f"设计者：{designer}" if designer else "设计者："
+            self._create_topic_element(topics_container, designer_text)
+            return
+        
+        # 建模需求：显示客户、产品、渠道、合作方、设计者
         req_info = self.parsed_doc.requirement_info
         
         # 创建children和topics容器
@@ -303,3 +335,62 @@ class XMindGenerator:
             parts.append(str(elem.description))
         
         return "-".join(parts)
+    
+    # ========== 非建模需求结构生成方法 ==========
+    
+    def _add_non_modeling_structure(self, topics_container: ET.Element):
+        """添加非建模需求的结构"""
+        # 1. 添加基础信息（固定节点）
+        basic_info_topic = self._create_topic_element(topics_container, '基础信息')
+        self._add_basic_info(basic_info_topic)
+        
+        # 2. 添加需求名称节点（如果有）
+        requirement_name = self.parsed_doc.requirement_name
+        if requirement_name:
+            requirement_topic = self._create_topic_element(topics_container, requirement_name)
+            self._add_activity_fixed_nodes(requirement_topic)
+        
+        # 3. 添加功能节点
+        if self.parsed_doc.functions:
+            for function in self.parsed_doc.functions:
+                if function and function.name:
+                    function_topic = self._create_topic_element(topics_container, function.name)
+                    self._add_function(function_topic, function)
+    
+    def _add_function(self, parent_topic: ET.Element, function):
+        """添加功能节点（非建模需求）"""
+        if not function:
+            return
+        
+        # 创建children和topics容器
+        children = ET.SubElement(parent_topic, 'children')
+        topics_container = ET.SubElement(children, 'topics', {'type': 'attached'})
+        
+        # 添加固定子节点：业务流程、业务规则、页面控制、数据验证
+        page_control_topic = None
+        for title in ["业务流程", "业务规则", "页面控制", "数据验证"]:
+            topic_elem = self._create_topic_element(topics_container, title)
+            if title == "页面控制":
+                page_control_topic = topic_elem
+        
+        # 将输入输出要素添加到页面控制节点下
+        if page_control_topic:
+            # 为页面控制创建children和topics容器
+            page_control_children = ET.SubElement(page_control_topic, 'children')
+            page_control_topics = ET.SubElement(page_control_children, 'topics', {'type': 'attached'})
+            
+            # 添加输入要素（按序号排序）
+            if function.input_elements:
+                sorted_inputs = sorted(function.input_elements, key=lambda x: x.index)
+                for elem in sorted_inputs:
+                    if elem:
+                        input_text = self._format_input_element(elem)
+                        self._create_topic_element(page_control_topics, input_text)
+            
+            # 添加输出要素（按序号排序）
+            if function.output_elements:
+                sorted_outputs = sorted(function.output_elements, key=lambda x: x.index)
+                for elem in sorted_outputs:
+                    if elem:
+                        output_text = self._format_output_element(elem)
+                        self._create_topic_element(page_control_topics, output_text)
