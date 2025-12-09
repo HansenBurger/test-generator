@@ -204,11 +204,11 @@
                   :title="`功能 ${index + 1}: ${func.name}`"
                 >
                   <div class="function-item">
-                    <p v-if="func.input_elements?.length">
-                      <strong>输入要素:</strong> {{ func.input_elements.length }} 个
+                    <p>
+                      <strong>输入要素:</strong> {{ func.input_elements?.length || 0 }} 个
                     </p>
-                    <p v-if="func.output_elements?.length">
-                      <strong>输出要素:</strong> {{ func.output_elements.length }} 个
+                    <p>
+                      <strong>输出要素:</strong> {{ func.output_elements?.length || 0 }} 个
                     </p>
                   </div>
                 </el-collapse-item>

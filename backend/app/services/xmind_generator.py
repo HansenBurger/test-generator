@@ -197,16 +197,21 @@ class XMindGenerator:
         topics_container = ET.SubElement(children, 'topics', {'type': 'attached'})
         
         # 按固定顺序添加：客户、产品、渠道、合作方、设计者
-        customer_text = f"客户（C）：{req_info.customer}" if req_info and req_info.customer else "客户（C）："
+        # 如果值为None，转换为"/"（因为文档中"/"表示不涉及）
+        customer_value = req_info.customer if req_info and req_info.customer else "/"
+        customer_text = f"客户（C）：{customer_value}"
         self._create_topic_element(topics_container, customer_text)
         
-        product_text = f"产品（P）：{req_info.product}" if req_info and req_info.product else "产品（P）："
+        product_value = req_info.product if req_info and req_info.product else "/"
+        product_text = f"产品（P）：{product_value}"
         self._create_topic_element(topics_container, product_text)
         
-        channel_text = f"渠道（C）：{req_info.channel}" if req_info and req_info.channel else "渠道（C）："
+        channel_value = req_info.channel if req_info and req_info.channel else "/"
+        channel_text = f"渠道（C）：{channel_value}"
         self._create_topic_element(topics_container, channel_text)
         
-        partner_text = f"合作方（P）：{req_info.partner}" if req_info and req_info.partner else "合作方（P）："
+        partner_value = req_info.partner if req_info and req_info.partner else "/"
+        partner_text = f"合作方（P）：{partner_value}"
         self._create_topic_element(topics_container, partner_text)
         
         self._create_topic_element(topics_container, "设计者：")
@@ -311,7 +316,12 @@ class XMindGenerator:
         
         # 规则3：下拉框类型
         if is_dropdown and input_limit:
-            return f"{field_name}-{required_text}；下拉选项包括：{input_limit}"
+            # 处理换行符：将换行符转换为空格，多个连续空格合并为一个
+            input_limit_cleaned = input_limit.replace('\n', ' ').replace('\r', ' ')
+            # 清理多余的空格
+            import re
+            input_limit_cleaned = re.sub(r'\s+', ' ', input_limit_cleaned).strip()
+            return f"{field_name}-{required_text}；下拉选项包括：{input_limit_cleaned}"
         
         # 规则1：有说明
         description = str(elem.description) if elem.description else ""
@@ -379,18 +389,18 @@ class XMindGenerator:
             page_control_children = ET.SubElement(page_control_topic, 'children')
             page_control_topics = ET.SubElement(page_control_children, 'topics', {'type': 'attached'})
             
-            # 添加输入要素（按序号排序）
+            # 添加输入要素（按序号排序，节点名称前加"输入-"）
             if function.input_elements:
                 sorted_inputs = sorted(function.input_elements, key=lambda x: x.index)
                 for elem in sorted_inputs:
                     if elem:
                         input_text = self._format_input_element(elem)
-                        self._create_topic_element(page_control_topics, input_text)
+                        self._create_topic_element(page_control_topics, f"输入-{input_text}")
             
-            # 添加输出要素（按序号排序）
+            # 添加输出要素（按序号排序，节点名称前加"输出-"）
             if function.output_elements:
                 sorted_outputs = sorted(function.output_elements, key=lambda x: x.index)
                 for elem in sorted_outputs:
                     if elem:
                         output_text = self._format_output_element(elem)
-                        self._create_topic_element(page_control_topics, output_text)
+                        self._create_topic_element(page_control_topics, f"输出-{output_text}")

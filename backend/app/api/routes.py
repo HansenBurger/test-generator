@@ -65,8 +65,9 @@ async def parse_document(file: UploadFile = File(...)):
             message="不支持的文件类型，请上传Word文档（.doc或.docx）"
         )
     
-    # 保存临时文件
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+    # 保存临时文件（根据实际上传的文件类型保存）
+    file_ext = '.doc' if file.filename.endswith('.doc') else '.docx'
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
         content = await file.read()
         tmp_file.write(content)
         tmp_path = tmp_file.name

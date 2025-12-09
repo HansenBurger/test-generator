@@ -2,6 +2,9 @@
 Word文档解析服务 - 银行需求文档专用解析器
 """
 import re
+import os
+import tempfile
+from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 from docx import Document
 from docx.document import Document as DocumentType
@@ -18,10 +21,106 @@ class DocumentParser:
     """文档解析器 - 针对银行需求文档格式"""
     
     def __init__(self, doc_path: str):
-        self.doc = Document(doc_path)
-        self.paragraphs = [p for p in self.doc.paragraphs]
-        self.tables = self.doc.tables
-        self.used_tables = set()  # 记录已使用的表格索引，避免重复使用
+        self._temp_docx_path = None  # 用于存储临时转换的 .docx 文件路径
+        actual_doc_path = self._handle_doc_file(doc_path)
+        
+        try:
+            self.doc = Document(actual_doc_path)
+            self.paragraphs = [p for p in self.doc.paragraphs]
+            self.tables = self.doc.tables
+            self.used_tables = set()  # 记录已使用的表格索引，避免重复使用
+        except Exception as e:
+            # 清理临时文件
+            self._cleanup_temp_file()
+            raise
+    
+    def _handle_doc_file(self, doc_path: str) -> str:
+        """处理 .doc 文件，如果是 .doc 格式则转换为 .docx"""
+        doc_path_obj = Path(doc_path)
+        
+        # 如果已经是 .docx 格式，直接返回
+        if doc_path_obj.suffix.lower() == '.docx':
+            return doc_path
+        
+        # 如果是 .doc 格式，需要转换
+        if doc_path_obj.suffix.lower() == '.doc':
+            return self._convert_doc_to_docx(doc_path)
+        
+        # 其他格式，尝试直接打开（可能会失败）
+        return doc_path
+    
+    def _convert_doc_to_docx(self, doc_path: str) -> str:
+        """将 .doc 文件转换为 .docx 格式（使用 Windows COM 接口）"""
+        try:
+            import win32com.client
+        except ImportError:
+            raise ValueError(
+                "无法处理 .doc 格式文件：需要安装 pywin32 库。"
+                "请运行: pip install pywin32"
+            )
+        
+        try:
+            # 创建临时 .docx 文件
+            temp_dir = tempfile.gettempdir()
+            # 使用安全的文件名（移除特殊字符，避免路径问题）
+            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', os.path.basename(doc_path))
+            temp_docx_path = os.path.join(
+                temp_dir,
+                f"converted_{safe_filename}.docx"
+            )
+            
+            # 使用 Word COM 接口转换
+            word_app = win32com.client.Dispatch("Word.Application")
+            word_app.Visible = False
+            word_app.DisplayAlerts = False
+            
+            try:
+                # 打开 .doc 文件
+                doc = word_app.Documents.Open(os.path.abspath(doc_path))
+                
+                # 保存为 .docx 格式
+                doc.SaveAs2(
+                    FileName=os.path.abspath(temp_docx_path),
+                    FileFormat=16  # wdFormatXMLDocument = 16 (.docx)
+                )
+                
+                doc.Close()
+                word_app.Quit()
+                
+                # 保存临时文件路径，用于后续清理
+                self._temp_docx_path = temp_docx_path
+                
+                return temp_docx_path
+                
+            except Exception as e:
+                try:
+                    word_app.Quit()
+                except:
+                    pass
+                raise ValueError(
+                    f"无法将 .doc 文件转换为 .docx 格式：{str(e)}。"
+                    "请确保已安装 Microsoft Word，或手动将文件转换为 .docx 格式。"
+                )
+        except Exception as e:
+            if isinstance(e, ValueError):
+                raise
+            raise ValueError(
+                f"无法处理 .doc 格式文件：{str(e)}。"
+                "请确保已安装 Microsoft Word，或手动将文件转换为 .docx 格式。"
+            )
+    
+    def _cleanup_temp_file(self):
+        """清理临时转换的 .docx 文件"""
+        if self._temp_docx_path and os.path.exists(self._temp_docx_path):
+            try:
+                os.unlink(self._temp_docx_path)
+            except:
+                pass
+            self._temp_docx_path = None
+    
+    def __del__(self):
+        """析构函数，清理临时文件"""
+        self._cleanup_temp_file()
     
     def parse(self) -> ParsedDocument:
         """解析文档主方法"""
@@ -33,11 +132,11 @@ class DocumentParser:
         elif doc_type == "non_modeling":
             return self._parse_non_modeling_document()
         else:
-            raise ValueError("无法识别文档类型：未找到'用例版本控制信息'表或'文件受控信息'表")
+            raise ValueError("无法识别文档类型：未找到'用例版本控制信息'表或'文件受控信息'/'文档受控信息'表")
     
     def _identify_document_type(self) -> Optional[str]:
         """识别文档类型：建模需求或非建模需求"""
-        # 优先查找"用例版本控制信息"（建模需求特征）
+        # 优先级1：查找"用例版本控制信息"（建模需求的明确标识）
         for para in self.paragraphs[:100]:
             text = para.text.strip()
             if "用例版本控制信息" in text:
@@ -50,18 +149,58 @@ class DocumentParser:
                     if "版本" in header_text:
                         return "modeling"
         
-        # 查找"文件受控信息"（非建模需求特征）
+        # 优先级2：查找"文件受控信息"或"文档受控信息"（非建模需求的明确标识）
+        # 同时检查是否有"功能清单"（非建模需求的另一个特征）
+        has_file_control = False
+        has_function_list = False
+        
         for para in self.paragraphs[:100]:
             text = para.text.strip()
-            if "文件受控信息" in text:
-                # 检查是否有包含"文件编号"或"文件名称"字段的表格
-                for table in self.tables:
-                    if len(table.rows) < 1:
-                        continue
-                    header_row = table.rows[0]
-                    header_text = ' '.join([cell.text.strip() for cell in header_row.cells])
-                    if "文件编号" in header_text or "文件名称" in header_text:
-                        return "non_modeling"
+            if "文件受控信息" in text or "文档受控信息" in text:
+                has_file_control = True
+            if "功能清单" in text:
+                has_function_list = True
+        
+        # 检查表格
+        for table in self.tables:
+            if len(table.rows) < 1:
+                continue
+            header_row = table.rows[0]
+            header_text = ' '.join([cell.text.strip() for cell in header_row.cells])
+            
+            if ("文件编号" in header_text or "文件名称" in header_text or 
+                "文档受控信息" in header_text):
+                has_file_control = True
+            
+            if "业务功能名称" in header_text or "功能名称" in header_text:
+                has_function_list = True
+        
+        # 如果有文件受控信息或功能清单，识别为非建模需求
+        if has_file_control or has_function_list:
+            return "non_modeling"
+        
+        # 优先级3：查找"版本控制信息"（不带"用例"前缀，可能是建模需求）
+        # 但需要更严格的判断：必须同时有"需求用例概述"
+        has_version_control = False
+        has_requirement_overview = False
+        
+        for para in self.paragraphs[:100]:
+            text = para.text.strip()
+            if "版本控制信息" in text and "用例" not in text:
+                has_version_control = True
+            if "需求用例概述" in text:
+                has_requirement_overview = True
+        
+        # 检查是否有包含"版本"字段的表格
+        for table in self.tables:
+            if len(table.rows) < 1:
+                continue
+            header_row = table.rows[0]
+            header_text = ' '.join([cell.text.strip() for cell in header_row.cells])
+            if "版本" in header_text and has_version_control:
+                # 如果同时有"需求用例概述"，才识别为建模需求
+                if has_requirement_overview:
+                    return "modeling"
         
         return None
     
@@ -530,7 +669,7 @@ class DocumentParser:
         return input_elements, output_elements
     
     def _parse_input_table(self, table: Table) -> List[InputElement]:
-        """解析输入要素表"""
+        """解析输入要素表（增强版）"""
         elements = []
         
         if len(table.rows) < 2:
@@ -539,19 +678,19 @@ class DocumentParser:
         # 获取表头
         headers = [cell.text.strip() for cell in table.rows[0].cells]
         
-        # 查找各列索引
+        # 使用模糊匹配查找各列索引
         index_idx = 0
-        name_idx = self._find_column_index(headers, ["字段名称", "名称"])
-        required_idx = self._find_column_index(headers, ["是否必输", "必输"])
-        format_idx = self._find_column_index(headers, ["字段格式", "格式"])
-        limit_idx = self._find_column_index(headers, ["输入限制", "限制"])
-        desc_idx = self._find_column_index(headers, ["说明", "描述"])
+        name_idx = self._fuzzy_find_column_index(headers, ["字段名称", "名称", "字段名"])
+        required_idx = self._fuzzy_find_column_index(headers, ["是否必输", "是否必填", "必输", "必填"])
+        format_idx = self._fuzzy_find_column_index(headers, ["字段格式", "格式", "输入格式"])
+        limit_idx = self._fuzzy_find_column_index(headers, ["输入限制", "限制", "数据字典"])
+        desc_idx = self._fuzzy_find_column_index(headers, ["说明", "描述", "备注"])
         
         if name_idx == -1:
             return elements
         
         # 解析数据行
-        for row in table.rows[1:]:
+        for i, row in enumerate(table.rows[1:]):
             if len(row.cells) < name_idx + 1:
                 continue
             
@@ -562,24 +701,24 @@ class DocumentParser:
                 continue
             
             try:
-                index = int(cells[index_idx]) if index_idx < len(cells) and cells[index_idx] else len(elements) + 1
+                index = int(cells[index_idx]) if index_idx < len(cells) and cells[index_idx] else i + 1
             except:
-                index = len(elements) + 1
+                index = i + 1
             
             element = InputElement(
                 index=index,
                 field_name=cells[name_idx] if name_idx < len(cells) else "",
-                required=cells[required_idx] if required_idx < len(cells) and required_idx != -1 else "否",
-                field_format=cells[format_idx] if format_idx < len(cells) and format_idx != -1 else None,
-                input_limit=cells[limit_idx] if limit_idx < len(cells) and limit_idx != -1 else None,
-                description=cells[desc_idx] if desc_idx < len(cells) and desc_idx != -1 else None
+                required=cells[required_idx] if required_idx != -1 and required_idx < len(cells) and cells[required_idx] else "否",
+                field_format=cells[format_idx] if format_idx != -1 and format_idx < len(cells) and cells[format_idx] else None,
+                input_limit=cells[limit_idx] if limit_idx != -1 and limit_idx < len(cells) and cells[limit_idx] else None,
+                description=cells[desc_idx] if desc_idx != -1 and desc_idx < len(cells) and cells[desc_idx] else None
             )
             elements.append(element)
         
         return elements
     
     def _parse_output_table(self, table: Table) -> List[OutputElement]:
-        """解析输出要素表"""
+        """解析输出要素表（增强版）"""
         elements = []
         
         if len(table.rows) < 2:
@@ -588,17 +727,17 @@ class DocumentParser:
         # 获取表头
         headers = [cell.text.strip() for cell in table.rows[0].cells]
         
-        # 查找各列索引
+        # 使用模糊匹配查找各列索引
         index_idx = 0
-        name_idx = self._find_column_index(headers, ["字段名称", "名称"])
-        type_idx = self._find_column_index(headers, ["类型", "字段类型"])
-        desc_idx = self._find_column_index(headers, ["说明", "描述"])
+        name_idx = self._fuzzy_find_column_index(headers, ["字段名称", "名称", "字段名"])
+        type_idx = self._fuzzy_find_column_index(headers, ["类型", "字段类型"])
+        desc_idx = self._fuzzy_find_column_index(headers, ["说明", "描述", "备注"])
         
         if name_idx == -1:
             return elements
         
         # 解析数据行
-        for row in table.rows[1:]:
+        for i, row in enumerate(table.rows[1:]):
             if len(row.cells) < name_idx + 1:
                 continue
             
@@ -609,15 +748,15 @@ class DocumentParser:
                 continue
             
             try:
-                index = int(cells[index_idx]) if index_idx < len(cells) and cells[index_idx] else len(elements) + 1
+                index = int(cells[index_idx]) if index_idx < len(cells) and cells[index_idx] else i + 1
             except:
-                index = len(elements) + 1
+                index = i + 1
             
             element = OutputElement(
                 index=index,
                 field_name=cells[name_idx] if name_idx < len(cells) else "",
-                field_type=cells[type_idx] if type_idx < len(cells) and type_idx != -1 else None,
-                description=cells[desc_idx] if desc_idx < len(cells) and desc_idx != -1 else None
+                field_type=cells[type_idx] if type_idx != -1 and type_idx < len(cells) and cells[type_idx] else None,
+                description=cells[desc_idx] if desc_idx != -1 and desc_idx < len(cells) and cells[desc_idx] else None
             )
             elements.append(element)
         
@@ -643,25 +782,271 @@ class DocumentParser:
                     return i
         return -1
     
+    def _fuzzy_find_column_index(self, headers: List[str], keywords: List[str]) -> int:
+        """模糊查找列索引
+        - 先尝试完全匹配
+        - 再尝试部分包含
+        - 最后尝试相似匹配
+        """
+        # 1. 完全匹配
+        for i, header in enumerate(headers):
+            for keyword in keywords:
+                if keyword == header or keyword in header:
+                    return i
+        
+        # 2. 部分包含（去除空格和标点）
+        for i, header in enumerate(headers):
+            cleaned_header = re.sub(r'[^\w\u4e00-\u9fa5]', '', header)
+            for keyword in keywords:
+                cleaned_keyword = re.sub(r'[^\w\u4e00-\u9fa5]', '', keyword)
+                if cleaned_keyword in cleaned_header or cleaned_header in cleaned_keyword:
+                    return i
+        
+        return -1
+    
+    def _is_input_table(self, header_text: str) -> bool:
+        """判断是否为输入要素表"""
+        # 必须包含字段名称
+        if "字段名称" not in header_text:
+            return False
+        
+        # 优先判断：如果包含"是否必输"或"数据来源"，很可能是输入表
+        if "是否必输" in header_text or "数据来源" in header_text:
+            return True
+        
+        # 备选判断：包含"输入限制"且不包含"输出"
+        if "输入限制" in header_text and "输出" not in header_text:
+            return True
+        
+        # 排除输出表：如果包含"输出限制"或"输出"关键词，不是输入表
+        if "输出限制" in header_text or ("输出" in header_text and "类型" in header_text):
+            return False
+        
+        return False
+    
+    def _is_output_table(self, header_text: str) -> bool:
+        """判断是否为输出要素表"""
+        # 必须包含字段名称
+        if "字段名称" not in header_text:
+            return False
+        
+        # 排除输入表特征：如果包含"是否必输"和"数据来源"，不是输出表
+        if "是否必输" in header_text and "数据来源" in header_text:
+            return False
+        
+        # 如果包含"是否必输"或"数据来源"，不是输出表
+        if "是否必输" in header_text or "数据来源" in header_text:
+            return False
+        
+        # 包含"类型"且包含"输出限制"或"输出"，是输出表
+        if "类型" in header_text and ("输出限制" in header_text or "输出" in header_text):
+            return True
+        
+        # 包含"类型"且不包含输入表特征，可能是输出表
+        if "类型" in header_text and "输入限制" not in header_text:
+            return True
+        
+        return False
+    
+    def _search_tables_near_marker(self, marker_index: int, is_input: bool, max_distance: int = 20) -> List:
+        """在标记附近搜索表格"""
+        elements = []
+        start_idx = max(0, marker_index - max_distance)
+        end_idx = min(len(self.paragraphs), marker_index + max_distance)
+        
+        # 在范围内查找表格（通过检查段落和表格的关联）
+        # 由于python-docx无法直接关联段落和表格，我们采用顺序查找策略
+        # 找到标记后，按顺序查找后续的未使用表格
+        for table_idx, table in enumerate(self.tables):
+            if table_idx in self.used_tables:
+                continue
+            if len(table.rows) < 2:
+                continue
+            
+            header_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
+            
+            if is_input and self._is_input_table(header_text):
+                parsed = self._parse_input_table(table)
+                if parsed:
+                    elements = parsed
+                    self.used_tables.add(table_idx)
+                    break
+            elif not is_input and self._is_output_table(header_text):
+                parsed = self._parse_output_table(table)
+                if parsed:
+                    elements = parsed
+                    self.used_tables.add(table_idx)
+                    break
+        
+        return elements
+    
+    def _search_tables_in_range(self, start: int, end: int, is_input: bool, allow_used: bool = False) -> List:
+        """在指定范围内搜索表格"""
+        elements = []
+        
+        # 按顺序查找表格
+        for table_idx, table in enumerate(self.tables):
+            if not allow_used and table_idx in self.used_tables:
+                continue
+            if len(table.rows) < 2:
+                continue
+            
+            header_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
+            
+            if is_input and self._is_input_table(header_text):
+                parsed = self._parse_input_table(table)
+                if parsed:
+                    elements = parsed
+                    if not allow_used:
+                        self.used_tables.add(table_idx)
+                    break
+            elif not is_input and self._is_output_table(header_text):
+                parsed = self._parse_output_table(table)
+                if parsed:
+                    elements = parsed
+                    if not allow_used:
+                        self.used_tables.add(table_idx)
+                    break
+        
+        return elements
+    
+    def _search_all_unused_tables(self, is_input: bool) -> List:
+        """遍历所有未使用的表格"""
+        elements = []
+        
+        for table_idx, table in enumerate(self.tables):
+            if table_idx in self.used_tables:
+                continue
+            if len(table.rows) < 2:
+                continue
+            
+            header_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
+            
+            if is_input and self._is_input_table(header_text):
+                parsed = self._parse_input_table(table)
+                if parsed:
+                    elements = parsed
+                    self.used_tables.add(table_idx)
+                    break
+            elif not is_input and self._is_output_table(header_text):
+                parsed = self._parse_output_table(table)
+                if parsed:
+                    elements = parsed
+                    self.used_tables.add(table_idx)
+                    break
+        
+        return elements
+    
+    def _find_nearest_table_after_marker(self, marker_index: int, is_input: bool) -> List:
+        """查找标记后最近的表格（即使已使用）
+        
+        这对于后面的功能很重要，因为它们的表格可能在已使用的表格之后
+        我们需要找到标记后最近的一个匹配表格
+        """
+        elements = []
+        
+        # 由于python-docx无法直接关联段落和表格，我们采用策略：
+        # 1. 先查找未使用的表格
+        # 2. 如果没找到，查找所有表格中第一个匹配的（按表格索引顺序）
+        
+        # 先尝试未使用的表格
+        for table_idx, table in enumerate(self.tables):
+            if table_idx in self.used_tables:
+                continue
+            if len(table.rows) < 2:
+                continue
+            
+            header_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
+            
+            if is_input and self._is_input_table(header_text):
+                parsed = self._parse_input_table(table)
+                if parsed:
+                    elements = parsed
+                    self.used_tables.add(table_idx)
+                    return elements
+        
+        # 如果没找到未使用的，查找所有表格（包括已使用的）
+        # 这对于"优惠利息查询"等后面功能很重要
+        for table_idx, table in enumerate(self.tables):
+            if len(table.rows) < 2:
+                continue
+            
+            header_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
+            
+            if is_input and self._is_input_table(header_text):
+                parsed = self._parse_input_table(table)
+                if parsed:
+                    # 检查表格内容是否可能属于当前功能
+                    # 简单策略：如果表格有数据，就使用它
+                    elements = parsed
+                    if table_idx not in self.used_tables:
+                        self.used_tables.add(table_idx)
+                    return elements
+            elif not is_input and self._is_output_table(header_text):
+                parsed = self._parse_output_table(table)
+                if parsed:
+                    elements = parsed
+                    if table_idx not in self.used_tables:
+                        self.used_tables.add(table_idx)
+                    return elements
+        
+        return elements
+    
     # ========== 非建模需求解析方法 ==========
     
     def _extract_file_controlled_info(self) -> Tuple[Optional[str], Optional[str]]:
-        """从文件受控信息表提取文件编号和文件名称"""
+        """从文件受控信息表或文档受控信息表提取文件编号和文件名称"""
         file_number = None
         file_name = None
         
+        # 查找包含"文件受控信息"或"文档受控信息"的段落或表格
         for para in self.paragraphs[:100]:
             text = para.text.strip()
-            if "文件受控信息" in text:
+            if "文件受控信息" in text or "文档受控信息" in text:
                 # 查找后续的表格
                 for table in self.tables:
-                    if len(table.rows) < 1:
+                    if len(table.rows) < 2:
                         continue
                     
                     header_row = table.rows[0]
                     headers = [cell.text.strip() for cell in header_row.cells]
+                    header_text = ' '.join(headers)
                     
-                    # 查找文件编号和文件名称列
+                    # 检查表格是否包含"文档受控信息"（可能是表头就是"文档受控信息"）
+                    if "文档受控信息" in header_text:
+                        # 特殊格式：行1可能是 ['文件编号', '值', '文件名称', '值']
+                        if len(table.rows) >= 2:
+                            data_row = table.rows[1]
+                            cells = [cell.text.strip() for cell in data_row.cells]
+                            
+                            # 查找"文件编号"和"文件名称"的位置
+                            for i, cell_text in enumerate(cells):
+                                if "文件编号" in cell_text and i + 1 < len(cells):
+                                    # 下一个单元格是文件编号的值
+                                    file_number = cells[i + 1] if cells[i + 1] and cells[i + 1] != '/' else None
+                                elif "文件名称" in cell_text and i + 1 < len(cells):
+                                    # 下一个单元格是文件名称的值
+                                    file_name = cells[i + 1] if cells[i + 1] and cells[i + 1] != '/' else None
+                            
+                            if file_number or file_name:
+                                return file_number, file_name
+                        
+                        # 也尝试纵向布局：第一列是键，第二列是值
+                        for row in table.rows[1:]:
+                            if len(row.cells) >= 2:
+                                key = row.cells[0].text.strip()
+                                value = row.cells[1].text.strip()
+                                
+                                if value and value != '/':
+                                    if ("文件编号" in key or ("编号" in key and "文件" in key)) and not file_number:
+                                        file_number = value
+                                    elif ("文件名称" in key or ("名称" in key and "文件" in key)) and not file_name:
+                                        file_name = value
+                        
+                        if file_number or file_name:
+                            return file_number, file_name
+                    
+                    # 查找文件编号和文件名称列（标准表格格式）
                     file_number_idx = self._find_column_index(headers, ["文件编号"])
                     file_name_idx = self._find_column_index(headers, ["文件名称"])
                     
@@ -672,10 +1057,10 @@ class DocumentParser:
                             values = [cell.text.strip() for cell in value_row.cells]
                             
                             if file_number_idx >= 0 and file_number_idx < len(values):
-                                file_number = values[file_number_idx]
+                                file_number = values[file_number_idx] if values[file_number_idx] and values[file_number_idx] != '/' else None
                             
                             if file_name_idx >= 0 and file_name_idx < len(values):
-                                file_name = values[file_name_idx]
+                                file_name = values[file_name_idx] if values[file_name_idx] and values[file_name_idx] != '/' else None
                         
                         # 也尝试纵向布局：第一列是键，第二列是值
                         for row in table.rows[1:]:
@@ -691,6 +1076,43 @@ class DocumentParser:
                         
                         if file_number or file_name:
                             return file_number, file_name
+        
+        # 也尝试直接从表格中查找（不依赖段落文本）
+        for table in self.tables:
+            if len(table.rows) < 2:
+                continue
+            
+            header_row = table.rows[0]
+            headers = [cell.text.strip() for cell in header_row.cells]
+            header_text = ' '.join(headers)
+            
+            # 检查是否是文档受控信息表
+            if "文档受控信息" in header_text:
+                # 特殊格式处理
+                if len(table.rows) >= 2:
+                    data_row = table.rows[1]
+                    cells = [cell.text.strip() for cell in data_row.cells]
+                    
+                    for i, cell_text in enumerate(cells):
+                        if "文件编号" in cell_text and i + 1 < len(cells):
+                            file_number = cells[i + 1] if cells[i + 1] and cells[i + 1] != '/' else None
+                        elif "文件名称" in cell_text and i + 1 < len(cells):
+                            file_name = cells[i + 1] if cells[i + 1] and cells[i + 1] != '/' else None
+                
+                # 也尝试纵向布局
+                for row in table.rows[1:]:
+                    if len(row.cells) >= 2:
+                        key = row.cells[0].text.strip()
+                        value = row.cells[1].text.strip()
+                        
+                        if value and value != '/':
+                            if ("文件编号" in key or ("编号" in key and "文件" in key)) and not file_number:
+                                file_number = value
+                            elif ("文件名称" in key or ("名称" in key and "文件" in key)) and not file_name:
+                                file_name = value
+                
+                if file_number or file_name:
+                    return file_number, file_name
         
         return file_number, file_name
     
@@ -720,41 +1142,10 @@ class DocumentParser:
         return None
     
     def _extract_designer(self) -> Optional[str]:
-        """从文件信息表提取设计者（作者）"""
-        for para in self.paragraphs[:100]:
-            text = para.text.strip()
-            if "文件信息" in text:
-                # 查找后续的表格
-                for table in self.tables:
-                    if len(table.rows) < 1:
-                        continue
-                    
-                    header_row = table.rows[0]
-                    headers = [cell.text.strip() for cell in header_row.cells]
-                    
-                    # 查找作者列
-                    author_idx = self._find_column_index(headers, ["作者"])
-                    
-                    if author_idx >= 0:
-                        # 解析数据行
-                        if len(table.rows) >= 2:
-                            value_row = table.rows[1]
-                            values = [cell.text.strip() for cell in value_row.cells]
-                            
-                            if author_idx < len(values):
-                                designer = values[author_idx]
-                                if designer and designer != '/':
-                                    return designer
-                        
-                        # 也尝试纵向布局
-                        for row in table.rows[1:]:
-                            if len(row.cells) >= 2:
-                                key = row.cells[0].text.strip()
-                                value = row.cells[1].text.strip()
-                                
-                                if "作者" in key and value and value != '/':
-                                    return value
+        """提取设计者（作者）
         
+        注意：设计者字段用于填写测试人员，不需要从文档中提取，直接返回None
+        """
         return None
     
     def _extract_function_list(self) -> List[str]:
@@ -819,36 +1210,73 @@ class DocumentParser:
         input_elements = []
         output_elements = []
         
-        # 查找"5.2 功能说明"下的对应功能章节
+        # 查找功能名称所在位置（可能在标题中，也可能在普通段落中）
+        # 优先查找功能说明部分（5.2）下的功能名称
         function_section_index = -1
         
+        # 清理功能名称用于匹配（去除标点符号）
+        cleaned_function = re.sub(r"[^\w\u4e00-\u9fa5]", "", function_name)
+        
+        # 先查找"功能说明"部分
+        function_section_start = -1
         for i, para in enumerate(self.paragraphs):
             text = para.text.strip()
-            
-            # 查找"5.2 功能说明"或"功能说明"
             if "功能说明" in text and ("5.2" in text or "（A阶段）" in text):
-                # 在该章节下查找功能名称（三级标题）
-                for j in range(i + 1, min(i + 200, len(self.paragraphs))):
-                    next_para = self.paragraphs[j]
-                    next_text = next_para.text.strip()
-                    
-                    # 如果遇到下一个一级或二级标题，停止搜索
-                    if self._is_heading(next_para, level=1) or self._is_heading(next_para, level=2):
-                        if "功能说明" not in next_text:
-                            break
-                    
-                    # 检查是否是三级标题且匹配功能名称
-                    if self._is_heading(next_para, level=3):
-                        # 模糊匹配功能名称（允许标点符号差异）
-                        cleaned_title = re.sub(r"[^\w\u4e00-\u9fa5]", "", next_text)
-                        cleaned_function = re.sub(r"[^\w\u4e00-\u9fa5]", "", function_name)
-                        
-                        if cleaned_function in cleaned_title or cleaned_title in cleaned_function:
-                            function_section_index = j
-                            break
+                function_section_start = i
+                break
+        
+        # 在功能说明部分查找功能名称（优先匹配精确的功能名称段落）
+        search_start = function_section_start if function_section_start >= 0 else 0
+        search_end = len(self.paragraphs)
+        
+        # 优先查找：在功能说明部分内精确匹配功能名称的段落
+        if function_section_start >= 0:
+            # 在功能说明部分内查找（跳过目录部分，通常目录在前100个段落）
+            for i in range(max(function_section_start, 100), search_end):
+                para = self.paragraphs[i]
+                text = para.text.strip()
                 
-                if function_section_index >= 0:
-                    break
+                # 精确匹配：段落文本就是功能名称（可能带编号）
+                if function_name == text or (function_name in text and len(text) <= len(function_name) + 10):
+                    # 排除目录和编号行
+                    if "目录" not in text and not re.match(r'^\d+\.\d+', text):
+                        function_section_index = i
+                        break
+        
+        # 如果没找到精确匹配，使用模糊匹配（优先在功能说明部分内）
+        if function_section_index < 0:
+            # 先在功能说明部分内查找
+            if function_section_start >= 0:
+                for i in range(max(function_section_start, 100), search_end):
+                    para = self.paragraphs[i]
+                    text = para.text.strip()
+                    
+                    # 检查是否匹配功能名称（可能是标题或普通段落）
+                    cleaned_text = re.sub(r"[^\w\u4e00-\u9fa5]", "", text)
+                    
+                    # 匹配逻辑：功能名称完全匹配，或者功能名称包含在文本中
+                    if (cleaned_function in cleaned_text or cleaned_text in cleaned_function) and len(cleaned_text) >= len(cleaned_function) * 0.7:
+                        # 确保不是在目录或其他不相关的地方
+                        if ("功能" in text or function_name in text) and "目录" not in text:
+                            # 排除目录行（通常包含页码）
+                            if not re.match(r'^\d+\.\d+', text) or len(text) > 50:
+                                function_section_index = i
+                                break
+            
+            # 如果还没找到，在整个文档中查找
+            if function_section_index < 0:
+                for i in range(search_start, search_end):
+                    para = self.paragraphs[i]
+                    text = para.text.strip()
+                    
+                    cleaned_text = re.sub(r"[^\w\u4e00-\u9fa5]", "", text)
+                    
+                    if (cleaned_function in cleaned_text or cleaned_text in cleaned_function) and len(cleaned_text) >= len(cleaned_function) * 0.7:
+                        if ("功能" in text or function_name in text) and "目录" not in text:
+                            # 排除目录行
+                            if not re.match(r'^\d+\.\d+', text) or len(text) > 50:
+                                function_section_index = i
+                                break
         
         if function_section_index < 0:
             return input_elements, output_elements
@@ -864,47 +1292,163 @@ class DocumentParser:
                 end_index = i
                 break
         
-        # 在功能章节内查找"输入要素"和"输出要素"
-        found_input_text = False
-        found_output_text = False
+        # 扩大搜索范围：从功能章节开始，向后搜索
+        search_start = max(0, function_section_index - 10)
+        search_end = min(len(self.paragraphs), function_section_index + 200)
         
-        for i in range(function_section_index + 1, end_index):
+        # 在功能章节内查找"输入要素"和"输出要素"标记
+        input_markers = ["输入要素", "输入要素：", "输入输出要素", "输入要素表"]
+        output_markers = ["输出要素", "输出要素：", "输出要素表"]
+        
+        found_input_marker = False
+        found_output_marker = False
+        input_marker_index = -1
+        output_marker_index = -1
+        
+        # 先找到"输入要素"和"输出要素"文本的位置，并检查是否"不涉及"
+        # 需要找到该功能章节内的第一个"输入输出要素"标记（在"输入输出说明"下）
+        input_not_involved = False
+        output_not_involved = False
+        found_input_output_section = False
+        
+        # 先查找"输入输出说明"标记，确保我们在正确的章节内
+        for i in range(search_start, search_end):
             para = self.paragraphs[i]
             text = para.text.strip()
             
-            # 查找"输入要素"文本
-            if ("输入要素" in text or ("输入" in text and "要素" in text)) and not found_input_text:
-                found_input_text = True
-                # 查找第一个未使用的输入要素表
-                for table_idx, table in enumerate(self.tables):
-                    if table_idx in self.used_tables:
-                        continue
-                    if len(table.rows) < 2:
-                        continue
-                    first_row_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
-                    if "输入" in first_row_text and "字段名称" in first_row_text:
-                        parsed = self._parse_input_table(table)
-                        if parsed:
-                            input_elements = parsed
-                            self.used_tables.add(table_idx)
+            # 查找"输入输出说明"或"输入输出要素"
+            if "输入输出说明" in text or ("输入输出要素" in text and "：" in text):
+                found_input_output_section = True
+                # 从"输入输出说明"开始查找输入输出要素标记
+                search_start_io = i
+                break
+        
+        # 如果找到了"输入输出说明"章节，在该章节内查找
+        if found_input_output_section:
+            for i in range(search_start_io, min(search_start_io + 20, search_end)):
+                para = self.paragraphs[i]
+                text = para.text.strip()
+                
+                # 查找"输入要素"标记（必须在"输入输出说明"章节内）
+                if not found_input_marker:
+                    for marker in input_markers:
+                        if marker in text and ("输入要素" in marker or marker == "输入要素："):
+                            found_input_marker = True
+                            input_marker_index = i
+                            # 检查后续段落（最多5行）是否包含"不涉及"
+                            # 需要跳过空行，直到找到下一个标记或"不涉及"
+                            for j in range(i + 1, min(i + 6, search_end)):
+                                next_text = self.paragraphs[j].text.strip()
+                                # 跳过空行
+                                if not next_text:
+                                    continue
+                                # 如果遇到下一个标记（如"输出要素"），停止检查
+                                if any(m in next_text for m in output_markers):
+                                    break
+                                # 如果遇到下一个章节标记（如"三、"），停止检查
+                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                    break
+                                # 检查是否包含"不涉及"
+                                if "不涉及" in next_text:
+                                    input_not_involved = True
+                                    break
                             break
+                
+                # 查找"输出要素"标记（必须在"输入输出说明"章节内）
+                if not found_output_marker:
+                    for marker in output_markers:
+                        if marker in text and ("输出要素" in marker or marker == "输出要素："):
+                            found_output_marker = True
+                            output_marker_index = i
+                            # 检查后续段落（最多5行）是否包含"不涉及"
+                            # 需要跳过空行，直到找到下一个标记或"不涉及"
+                            for j in range(i + 1, min(i + 6, search_end)):
+                                next_text = self.paragraphs[j].text.strip()
+                                # 跳过空行
+                                if not next_text:
+                                    continue
+                                # 如果遇到下一个章节标记（如"三、"），停止检查
+                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                    break
+                                # 检查是否包含"不涉及"
+                                if "不涉及" in next_text:
+                                    output_not_involved = True
+                                    break
+                            break
+                
+                if found_input_marker and found_output_marker:
+                    break
+        else:
+            # 如果没有找到"输入输出说明"，使用原来的逻辑
+            for i in range(search_start, search_end):
+                para = self.paragraphs[i]
+                text = para.text.strip()
+                
+                # 查找"输入要素"标记
+                if not found_input_marker:
+                    for marker in input_markers:
+                        if marker in text:
+                            found_input_marker = True
+                            input_marker_index = i
+                            # 检查后续段落是否包含"不涉及"
+                            for j in range(i + 1, min(i + 4, search_end)):
+                                next_text = self.paragraphs[j].text.strip()
+                                if any(m in next_text for m in output_markers):
+                                    break
+                                if "不涉及" in next_text:
+                                    input_not_involved = True
+                                    break
+                            break
+                
+                # 查找"输出要素"标记
+                if not found_output_marker:
+                    for marker in output_markers:
+                        if marker in text:
+                            found_output_marker = True
+                            output_marker_index = i
+                            # 检查后续段落是否包含"不涉及"
+                            for j in range(i + 1, min(i + 4, search_end)):
+                                next_text = self.paragraphs[j].text.strip()
+                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                    break
+                                if "不涉及" in next_text:
+                                    output_not_involved = True
+                                    break
+                            break
+                
+                if found_input_marker and found_output_marker:
+                    break
+        
+        # 智能表格定位：按顺序查找未使用的表格
+        # 查找输入要素表（只有在不是"不涉及"的情况下才查找）
+        if found_input_marker and not input_not_involved:
+            # 方法1：直接按顺序查找第一个未使用的输入要素表
+            input_elements = self._search_all_unused_tables(is_input=True)
             
-            # 查找"输出要素"文本
-            if ("输出要素" in text or ("输出" in text and "要素" in text)) and not found_output_text:
-                found_output_text = True
-                # 查找第一个未使用的输出要素表
-                for table_idx, table in enumerate(self.tables):
-                    if table_idx in self.used_tables:
-                        continue
-                    if len(table.rows) < 2:
-                        continue
-                    first_row_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
-                    if ("字段名称" in first_row_text and "类型" in first_row_text and 
-                        "是否必输" not in first_row_text and "数据来源" not in first_row_text):
-                        parsed = self._parse_output_table(table)
-                        if parsed:
-                            output_elements = parsed
-                            self.used_tables.add(table_idx)
-                            break
+            # 方法2：如果没找到，尝试查找标记后最近的一个输入要素表（即使已使用）
+            # 这对于"优惠利息查询"等后面功能很重要，因为它们的表格可能在已使用的表格之后
+            if not input_elements and input_marker_index >= 0:
+                # 查找标记后最近的输入要素表
+                input_elements = self._find_nearest_table_after_marker(
+                    input_marker_index, is_input=True
+                )
+        elif input_not_involved:
+            # 如果标记为"不涉及"，不提取输入要素
+            input_elements = []
+        
+        # 查找输出要素表（只有在不是"不涉及"的情况下才查找）
+        if found_output_marker and not output_not_involved:
+            # 方法1：直接按顺序查找第一个未使用的输出要素表
+            output_elements = self._search_all_unused_tables(is_input=False)
+            
+            # 方法2：如果没找到，尝试查找标记后最近的一个输出要素表（即使已使用）
+            if not output_elements and output_marker_index >= 0:
+                # 查找标记后最近的输出要素表
+                output_elements = self._find_nearest_table_after_marker(
+                    output_marker_index, is_input=False
+                )
+        elif output_not_involved:
+            # 如果标记为"不涉及"，不提取输出要素
+            output_elements = []
         
         return input_elements, output_elements

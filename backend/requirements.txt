@@ -3,5 +3,7 @@ uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 python-docx>=1.1.0
 pydantic>=2.5.0
+pywin32>=306; sys_platform == "win32"
 # 注意：pydantic需要预编译的wheel包，使用 --only-binary :all: pydantic 安装
+# pywin32 用于在 Windows 上将 .doc 文件转换为 .docx 格式
 
