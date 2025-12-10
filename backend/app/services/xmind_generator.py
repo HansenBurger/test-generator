@@ -149,32 +149,22 @@ class XMindGenerator:
     
     def _build_root_title(self) -> str:
         """构建根节点标题"""
-        # 非建模需求：需求说明书编号-需求名称
+        # 非建模需求：需求项目编号-需求名称（不包含文件编号）
         if self.parsed_doc.document_type == "non_modeling":
-            file_number = self.parsed_doc.file_number or ""
             requirement_name = self.parsed_doc.requirement_name or ""
             
-            if file_number and requirement_name:
-                return f"{file_number}-{requirement_name}"
-            elif requirement_name:
-                return requirement_name
-            elif file_number:
-                return f"{file_number}-测试大纲"
+            if requirement_name:
+                return f"需求项目编号-{requirement_name}"
             else:
-                return "测试大纲"
+                return "需求项目编号-测试大纲"
         
-        # 建模需求：需求用例名称-版本号
+        # 建模需求：需求项目编号-需求名称（不包含版本号）
         case_name = self.parsed_doc.requirement_info.case_name or ""
-        version = self.parsed_doc.version or ""
         
-        if case_name and version:
-            return f"{case_name}-{version}"
-        elif case_name:
-            return case_name
-        elif version:
-            return f"测试大纲-{version}"
+        if case_name:
+            return f"需求项目编号-{case_name}"
         else:
-            return "测试大纲"
+            return "需求项目编号-测试大纲"
     
     def _add_basic_info(self, parent_topic: ET.Element):
         """添加基础信息节点"""
@@ -298,9 +288,9 @@ class XMindGenerator:
         """格式化输入要素节点文本
         
         规则：
-        1. 如果说明不为空：字段名称-是否必输-说明
-        2. 如果说明为空且字段格式非下拉框：字段名称-是否必输
-        3. 如果字段格式为下拉框：字段名称-是否必输；下拉选项包括：输入限制
+        输入-字段名称-必输/非必输-字段格式（精度）
+        字段格式只有为文本框的时候要带上精度，其他类型不带
+        如果字段格式为下拉框：字段名称-必输/非必输；下拉选项包括：输入限制
         """
         if not elem:
             return ""
@@ -314,7 +304,7 @@ class XMindGenerator:
         input_limit = str(elem.input_limit) if elem.input_limit else ""
         is_dropdown = "下拉" in field_format or "下拉" in input_limit
         
-        # 规则3：下拉框类型
+        # 规则：下拉框类型
         if is_dropdown and input_limit:
             # 处理换行符：将换行符转换为空格，多个连续空格合并为一个
             input_limit_cleaned = input_limit.replace('\n', ' ').replace('\r', ' ')
@@ -323,28 +313,56 @@ class XMindGenerator:
             input_limit_cleaned = re.sub(r'\s+', ' ', input_limit_cleaned).strip()
             return f"{field_name}-{required_text}；下拉选项包括：{input_limit_cleaned}"
         
-        # 规则1：有说明
-        description = str(elem.description) if elem.description else ""
-        if description:
-            return f"{field_name}-{required_text}-{description}"
+        # 构建基础格式：字段名称-必输/非必输
+        parts = [field_name, required_text]
         
-        # 规则2：无说明且非下拉框
-        return f"{field_name}-{required_text}"
+        # 添加字段格式
+        if field_format:
+            # 判断是否为文本框（文本框需要显示精度）
+            is_textbox = "文本" in field_format or field_format == "文本框"
+            precision = str(elem.precision) if elem.precision else ""
+            
+            if is_textbox and precision:
+                # 文本框：字段格式（精度）
+                parts.append(f"{field_format}（{precision}）")
+            else:
+                # 其他类型：只显示字段格式
+                parts.append(field_format)
+        
+        return "-".join(parts)
     
     def _format_output_element(self, elem) -> str:
-        """格式化输出要素节点文本：字段名称-类型-说明"""
+        """格式化输出要素节点文本：字段名称-类型（如果是文本框则带上精度）
+        
+        输出-字段名称-类型
+        如果是文本框就带上精度：输出-字段名称-类型（精度）
+        """
         if not elem:
             return ""
         
-        parts = [str(elem.field_name) if elem.field_name else ""]
+        field_name = str(elem.field_name) if elem.field_name else ""
+        field_type = str(elem.field_type) if elem.field_type else ""
         
-        if elem.field_type:
-            parts.append(str(elem.field_type))
+        # 如果是文本框，检查是否需要添加精度
+        field_format = str(elem.field_format) if elem.field_format else ""
+        precision = str(elem.precision) if elem.precision else ""
         
-        if elem.description:
-            parts.append(str(elem.description))
+        is_textbox = False
+        if field_format:
+            # 判断是否为文本框（文本框需要显示精度）
+            is_textbox = "文本" in field_format or field_format == "文本框"
         
-        return "-".join(parts)
+        # 构建格式：字段名称-类型（如果是文本框且有精度，则类型后加精度）
+        if field_type:
+            if is_textbox and precision:
+                # 文本框：字段名称-类型（精度）
+                return f"{field_name}-{field_type}（{precision}）"
+            else:
+                # 其他情况：字段名称-类型
+                return f"{field_name}-{field_type}"
+        else:
+            # 如果没有类型，只返回字段名称
+            return field_name
     
     # ========== 非建模需求结构生成方法 ==========
     
@@ -375,6 +393,12 @@ class XMindGenerator:
         # 创建children和topics容器
         children = ET.SubElement(parent_topic, 'children')
         topics_container = ET.SubElement(children, 'topics', {'type': 'attached'})
+        
+        # 先添加两个相同的功能名称子节点
+        function_name = function.name if function.name else ""
+        if function_name:
+            self._create_topic_element(topics_container, function_name)
+            self._create_topic_element(topics_container, function_name)
         
         # 添加固定子节点：业务流程、业务规则、页面控制、数据验证
         page_control_topic = None

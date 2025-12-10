@@ -112,13 +112,15 @@ async def generate_outline(request: GenerateOutlineRequest):
         generator = XMindGenerator(request.parsed_data)
         xmind_bytes = generator.generate()
         
-        # 生成文件名：用例名称-版本号
-        case_name = request.parsed_data.requirement_info.case_name or "测试大纲"
-        version = request.parsed_data.version or ""
-        if version:
-            filename = f"{case_name}-{version}.xmind"
+        # 生成文件名：统一格式为需求名称-时间戳
+        if request.parsed_data.document_type == "non_modeling":
+            requirement_name = request.parsed_data.requirement_name or "测试大纲"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{requirement_name}-{timestamp}.xmind"
         else:
-            filename = f"{case_name}.xmind"
+            case_name = request.parsed_data.requirement_info.case_name or "测试大纲"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{case_name}-{timestamp}.xmind"
         
         # 返回文件流
         return StreamingResponse(
@@ -142,20 +144,15 @@ async def generate_outline_from_json(parsed_data: ParsedDocument):
         generator = XMindGenerator(parsed_data)
         xmind_bytes = generator.generate()
         
-        # 生成文件名
+        # 生成文件名：统一格式为需求名称-时间戳
         if parsed_data.document_type == "non_modeling":
-            # 非建模需求：需求名称-时间戳
             requirement_name = parsed_data.requirement_name or "测试大纲"
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{requirement_name}-{timestamp}.xmind"
         else:
-            # 建模需求：用例名称-版本号
             case_name = parsed_data.requirement_info.case_name or "测试大纲"
-            version = parsed_data.version or ""
-            if version:
-                filename = f"{case_name}-{version}.xmind"
-            else:
-                filename = f"{case_name}.xmind"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{case_name}-{timestamp}.xmind"
         
         # 对文件名进行URL编码，确保中文正确显示
         import urllib.parse

@@ -19,6 +19,8 @@ class InputElement(BaseModel):
     index: int  # 序号
     field_name: str  # 字段名称
     required: str  # 是否必输（是/否）
+    field_type: Optional[str] = None  # 类型
+    precision: Optional[str] = None  # 精度
     field_format: Optional[str] = None  # 字段格式
     input_limit: Optional[str] = None  # 输入限制
     description: Optional[str] = None  # 说明
@@ -29,6 +31,8 @@ class OutputElement(BaseModel):
     index: int  # 序号
     field_name: str  # 字段名称
     field_type: Optional[str] = None  # 类型
+    precision: Optional[str] = None  # 精度
+    field_format: Optional[str] = None  # 字段格式
     description: Optional[str] = None  # 说明
 
 

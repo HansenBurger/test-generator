@@ -458,7 +458,7 @@ const handlePreviewConfirm = async () => {
       const link = document.createElement('a')
       link.href = url
       
-      // 根据文档类型生成文件名
+      // 根据文档类型生成文件名：统一格式为需求名称-时间戳
       let filename = '测试大纲.xmind'
       if (item.data.document_type === 'non_modeling') {
         // 非建模需求：需求名称-时间戳
@@ -466,14 +466,10 @@ const handlePreviewConfirm = async () => {
         const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_').slice(0, 15)
         filename = `${requirementName}-${timestamp}.xmind`
       } else {
-        // 建模需求：用例名称-版本号
+        // 建模需求：用例名称-时间戳（与非建模需求格式一致）
         const caseName = item.data.requirement_info?.case_name || '测试大纲'
-        const version = item.data.version || ''
-        if (version) {
-          filename = `${caseName}-${version}.xmind`
-        } else {
-          filename = `${caseName}.xmind`
-        }
+        const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '_').slice(0, 15)
+        filename = `${caseName}-${timestamp}.xmind`
       }
       link.download = filename
       

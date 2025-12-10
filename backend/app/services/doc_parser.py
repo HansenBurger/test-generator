@@ -682,6 +682,8 @@ class DocumentParser:
         index_idx = 0
         name_idx = self._fuzzy_find_column_index(headers, ["字段名称", "名称", "字段名"])
         required_idx = self._fuzzy_find_column_index(headers, ["是否必输", "是否必填", "必输", "必填"])
+        type_idx = self._fuzzy_find_column_index(headers, ["类型", "字段类型"])
+        precision_idx = self._fuzzy_find_column_index(headers, ["精度"])
         format_idx = self._fuzzy_find_column_index(headers, ["字段格式", "格式", "输入格式"])
         limit_idx = self._fuzzy_find_column_index(headers, ["输入限制", "限制", "数据字典"])
         desc_idx = self._fuzzy_find_column_index(headers, ["说明", "描述", "备注"])
@@ -709,6 +711,8 @@ class DocumentParser:
                 index=index,
                 field_name=cells[name_idx] if name_idx < len(cells) else "",
                 required=cells[required_idx] if required_idx != -1 and required_idx < len(cells) and cells[required_idx] else "否",
+                field_type=cells[type_idx] if type_idx != -1 and type_idx < len(cells) and cells[type_idx] else None,
+                precision=cells[precision_idx] if precision_idx != -1 and precision_idx < len(cells) and cells[precision_idx] else None,
                 field_format=cells[format_idx] if format_idx != -1 and format_idx < len(cells) and cells[format_idx] else None,
                 input_limit=cells[limit_idx] if limit_idx != -1 and limit_idx < len(cells) and cells[limit_idx] else None,
                 description=cells[desc_idx] if desc_idx != -1 and desc_idx < len(cells) and cells[desc_idx] else None
@@ -731,6 +735,8 @@ class DocumentParser:
         index_idx = 0
         name_idx = self._fuzzy_find_column_index(headers, ["字段名称", "名称", "字段名"])
         type_idx = self._fuzzy_find_column_index(headers, ["类型", "字段类型"])
+        precision_idx = self._fuzzy_find_column_index(headers, ["精度"])
+        format_idx = self._fuzzy_find_column_index(headers, ["字段格式", "格式"])
         desc_idx = self._fuzzy_find_column_index(headers, ["说明", "描述", "备注"])
         
         if name_idx == -1:
@@ -756,6 +762,8 @@ class DocumentParser:
                 index=index,
                 field_name=cells[name_idx] if name_idx < len(cells) else "",
                 field_type=cells[type_idx] if type_idx != -1 and type_idx < len(cells) and cells[type_idx] else None,
+                precision=cells[precision_idx] if precision_idx != -1 and precision_idx < len(cells) and cells[precision_idx] else None,
+                field_format=cells[format_idx] if format_idx != -1 and format_idx < len(cells) and cells[format_idx] else None,
                 description=cells[desc_idx] if desc_idx != -1 and desc_idx < len(cells) and cells[desc_idx] else None
             )
             elements.append(element)
@@ -842,8 +850,9 @@ class DocumentParser:
         if "类型" in header_text and ("输出限制" in header_text or "输出" in header_text):
             return True
         
-        # 包含"类型"且不包含输入表特征，可能是输出表
-        if "类型" in header_text and "输入限制" not in header_text:
+        # 包含"类型"且不包含"是否必输"和"数据来源"，可能是输出表
+        # 注意：即使有"输入限制"列，只要没有"是否必输"和"数据来源"，也可能是输出表
+        if "类型" in header_text:
             return True
         
         return False
@@ -1123,16 +1132,26 @@ class DocumentParser:
         """
         # 方案一：从文件名称提取
         if file_name:
-            # 正则模式：大信贷系统(.+?)业务需求说明书
-            match = re.search(r"大信贷系统(.+?)业务需求说明书", file_name)
-            if match:
-                requirement_name = match.group(1).strip()
-                # 清理处理：去除括号内容
-                requirement_name = re.sub(r"（[^）]*）", "", requirement_name)
-                requirement_name = re.sub(r"\([^)]*\)", "", requirement_name)
-                requirement_name = requirement_name.strip()
-                if requirement_name:
-                    return requirement_name
+            # 清理换行符和多余空格
+            file_name = file_name.replace('\n', '').replace('\r', '')
+            file_name = re.sub(r'\s+', '', file_name)
+            
+            # 尝试多种正则模式匹配
+            patterns = [
+                r"大信贷系统(.+?)业务需求说明书",  # 标准格式
+                r"大信贷系统详细业务-(.+?)需求说明书",  # 详细业务格式
+                r"大信贷系统(.+?)需求说明书",  # 简化格式
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, file_name)
+                if match:
+                    requirement_name = match.group(1).strip()
+                    # 清理处理：去除括号内容（但保留功能名称中的括号，如"贷款当日冲正（前台）"）
+                    # 只去除说明性的括号，如"（优化对客服务类）"
+                    # 如果需求名称本身包含括号，应该保留
+                    if requirement_name:
+                        return requirement_name
         
         # 方案二：从功能清单第一项提取
         functions = self._extract_function_list()
@@ -1192,9 +1211,87 @@ class DocumentParser:
         if not function_names:
             return functions
         
-        # 2. 为每个功能提取详细输入输出要素
+        # 2. 性能优化：一次性查找"功能说明"部分起始位置
+        function_section_start = -1
+        for i, para in enumerate(self.paragraphs):
+            text = para.text.strip()
+            if "功能说明" in text and ("5.2" in text or "（A阶段）" in text):
+                function_section_start = i
+                break
+        
+        # 3. 性能优化：一次性建立功能名称到段落索引的映射
+        function_name_to_index = {}
+        search_start = max(function_section_start if function_section_start >= 0 else 0, 100)
+        search_end = len(self.paragraphs)
+        
+        # 为每个功能名称建立索引映射（使用与原方法相同的逻辑）
         for function_name in function_names:
-            input_elements, output_elements = self._extract_function_input_output(function_name)
+            cleaned_function = re.sub(r"[^\w\u4e00-\u9fa5]", "", function_name)
+            found = False
+            
+            # 优先查找：在功能说明部分内精确匹配功能名称的段落
+            if function_section_start >= 0:
+                # 在功能说明部分内查找（跳过目录部分，通常目录在前100个段落）
+                for i in range(max(function_section_start, 100), search_end):
+                    para = self.paragraphs[i]
+                    text = para.text.strip()
+                    
+                    # 精确匹配：段落文本就是功能名称（可能带编号）
+                    if function_name == text or (function_name in text and len(text) <= len(function_name) + 10):
+                        # 排除目录和编号行
+                        if "目录" not in text and not re.match(r'^\d+\.\d+', text):
+                            function_name_to_index[function_name] = i
+                            found = True
+                            break
+            
+            # 如果没找到精确匹配，使用模糊匹配（优先在功能说明部分内）
+            if not found:
+                if function_section_start >= 0:
+                    # 先在功能说明部分内查找
+                    for i in range(max(function_section_start, 100), search_end):
+                        para = self.paragraphs[i]
+                        text = para.text.strip()
+                        
+                        # 检查是否匹配功能名称（可能是标题或普通段落）
+                        cleaned_text = re.sub(r"[^\w\u4e00-\u9fa5]", "", text)
+                        
+                        # 匹配逻辑：功能名称完全匹配，或者功能名称包含在文本中
+                        if (cleaned_function in cleaned_text or cleaned_text in cleaned_function) and len(cleaned_text) >= len(cleaned_function) * 0.7:
+                            # 确保不是在目录或其他不相关的地方
+                            if ("功能" in text or function_name in text) and "目录" not in text:
+                                # 排除目录行（通常包含页码）
+                                if not re.match(r'^\d+\.\d+', text) or len(text) > 50:
+                                    function_name_to_index[function_name] = i
+                                    found = True
+                                    break
+                
+                # 如果还没找到，在整个文档中查找
+                if not found:
+                    for i in range(search_start, search_end):
+                        para = self.paragraphs[i]
+                        text = para.text.strip()
+                        
+                        cleaned_text = re.sub(r"[^\w\u4e00-\u9fa5]", "", text)
+                        
+                        if (cleaned_function in cleaned_text or cleaned_text in cleaned_function) and len(cleaned_text) >= len(cleaned_function) * 0.7:
+                            if ("功能" in text or function_name in text) and "目录" not in text:
+                                # 排除目录行
+                                if not re.match(r'^\d+\.\d+', text) or len(text) > 50:
+                                    function_name_to_index[function_name] = i
+                                    break
+        
+        # 4. 为每个功能提取详细输入输出要素（使用缓存的索引，失败时回退到原方法）
+        for function_name in function_names:
+            function_index = function_name_to_index.get(function_name, -1)
+            
+            # 如果优化方法找到了索引，使用优化版本；否则回退到原方法
+            if function_index >= 0:
+                input_elements, output_elements = self._extract_function_input_output_optimized(
+                    function_name, function_index, function_section_start
+                )
+            else:
+                # 回退到原来的方法，确保兼容性
+                input_elements, output_elements = self._extract_function_input_output(function_name)
             
             function = FunctionInfo(
                 name=function_name,
@@ -1204,6 +1301,165 @@ class DocumentParser:
             functions.append(function)
         
         return functions
+    
+    def _extract_function_input_output_optimized(self, function_name: str, function_section_index: int, function_section_start: int) -> Tuple[List[InputElement], List[OutputElement]]:
+        """提取指定功能的输入输出要素（优化版本，使用预计算的索引）"""
+        input_elements = []
+        output_elements = []
+        
+        if function_section_index < 0:
+            return input_elements, output_elements
+        
+        # 在功能章节内查找输入输出要素
+        # 查找结束位置（下一个三级标题、二级标题或一级标题）
+        end_index = len(self.paragraphs)
+        for i in range(function_section_index + 1, len(self.paragraphs)):
+            para = self.paragraphs[i]
+            if (self._is_heading(para, level=3) or 
+                self._is_heading(para, level=2) or 
+                self._is_heading(para, level=1)):
+                end_index = i
+                break
+        
+        # 扩大搜索范围：从功能章节开始，向后搜索
+        search_start = max(0, function_section_index - 10)
+        search_end = min(len(self.paragraphs), function_section_index + 200)
+        
+        # 在功能章节内查找"输入要素"和"输出要素"标记
+        input_markers = ["输入要素", "输入要素：", "输入输出要素", "输入要素表"]
+        output_markers = ["输出要素", "输出要素：", "输出要素表"]
+        
+        found_input_marker = False
+        found_output_marker = False
+        input_marker_index = -1
+        output_marker_index = -1
+        
+        # 先找到"输入要素"和"输出要素"文本的位置，并检查是否"不涉及"
+        input_not_involved = False
+        output_not_involved = False
+        found_input_output_section = False
+        
+        # 先查找"输入输出说明"标记，确保我们在正确的章节内
+        for i in range(search_start, search_end):
+            para = self.paragraphs[i]
+            text = para.text.strip()
+            
+            # 查找"输入输出说明"或"输入输出要素"
+            if "输入输出说明" in text or ("输入输出要素" in text and "：" in text):
+                found_input_output_section = True
+                search_start_io = i
+                break
+        
+        # 如果找到了"输入输出说明"章节，在该章节内查找
+        if found_input_output_section:
+            for i in range(search_start_io, min(search_start_io + 20, search_end)):
+                para = self.paragraphs[i]
+                text = para.text.strip()
+                
+                # 查找"输入要素"标记
+                if not found_input_marker:
+                    for marker in input_markers:
+                        if marker in text and ("输入要素" in marker or marker == "输入要素："):
+                            found_input_marker = True
+                            input_marker_index = i
+                            # 检查后续段落（最多5行）是否包含"不涉及"
+                            for j in range(i + 1, min(i + 6, search_end)):
+                                next_text = self.paragraphs[j].text.strip()
+                                if not next_text:
+                                    continue
+                                if any(m in next_text for m in output_markers):
+                                    break
+                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                    break
+                                if "不涉及" in next_text:
+                                    input_not_involved = True
+                                    break
+                            break
+                
+                # 查找"输出要素"标记
+                if not found_output_marker:
+                    for marker in output_markers:
+                        if marker in text and ("输出要素" in marker or marker == "输出要素："):
+                            found_output_marker = True
+                            output_marker_index = i
+                            # 检查后续段落（最多5行）是否包含"不涉及"
+                            for j in range(i + 1, min(i + 6, search_end)):
+                                next_text = self.paragraphs[j].text.strip()
+                                if not next_text:
+                                    continue
+                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                    break
+                                if "不涉及" in next_text:
+                                    output_not_involved = True
+                                    break
+                            break
+                
+                if found_input_marker and found_output_marker:
+                    break
+        else:
+            # 如果没有找到"输入输出说明"，使用原来的逻辑
+            for i in range(search_start, search_end):
+                para = self.paragraphs[i]
+                text = para.text.strip()
+                
+                # 查找"输入要素"标记
+                if not found_input_marker:
+                    for marker in input_markers:
+                        if marker in text:
+                            found_input_marker = True
+                            input_marker_index = i
+                            # 检查后续段落是否包含"不涉及"
+                            for j in range(i + 1, min(i + 4, search_end)):
+                                next_text = self.paragraphs[j].text.strip()
+                                if any(m in next_text for m in output_markers):
+                                    break
+                                if "不涉及" in next_text:
+                                    input_not_involved = True
+                                    break
+                            break
+                
+                # 查找"输出要素"标记
+                if not found_output_marker:
+                    for marker in output_markers:
+                        if marker in text:
+                            found_output_marker = True
+                            output_marker_index = i
+                            # 检查后续段落是否包含"不涉及"
+                            for j in range(i + 1, min(i + 4, search_end)):
+                                next_text = self.paragraphs[j].text.strip()
+                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                    break
+                                if "不涉及" in next_text:
+                                    output_not_involved = True
+                                    break
+                            break
+                
+                if found_input_marker and found_output_marker:
+                    break
+        
+        # 智能表格定位：按顺序查找未使用的表格
+        if found_input_marker and not input_not_involved:
+            input_elements = self._search_all_unused_tables(is_input=True)
+            if not input_elements and input_marker_index >= 0:
+                input_elements = self._find_nearest_table_after_marker(
+                    input_marker_index, is_input=True
+                )
+        elif input_not_involved:
+            input_elements = []
+        
+        if found_output_marker and not output_not_involved:
+            # 优先查找标记后最近的输出要素表
+            if output_marker_index >= 0:
+                output_elements = self._find_nearest_table_after_marker(
+                    output_marker_index, is_input=False
+                )
+            # 如果没找到，再查找所有未使用的表格
+            if not output_elements:
+                output_elements = self._search_all_unused_tables(is_input=False)
+        elif output_not_involved:
+            output_elements = []
+        
+        return input_elements, output_elements
     
     def _extract_function_input_output(self, function_name: str) -> Tuple[List[InputElement], List[OutputElement]]:
         """提取指定功能的输入输出要素"""
