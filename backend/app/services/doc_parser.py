@@ -50,7 +50,33 @@ class DocumentParser:
         return doc_path
     
     def _convert_doc_to_docx(self, doc_path: str) -> str:
-        """将 .doc 文件转换为 .docx 格式（使用 Windows COM 接口）"""
+        """将 .doc 文件转换为 .docx 格式
+        
+        在Windows上使用pywin32 + Microsoft Word COM接口
+        在Linux上使用LibreOffice命令行工具
+        """
+        import platform
+        import subprocess
+        
+        # 创建临时 .docx 文件
+        temp_dir = tempfile.gettempdir()
+        # 使用安全的文件名（移除特殊字符，避免路径问题）
+        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', os.path.basename(doc_path))
+        # 移除原扩展名，添加.docx
+        base_name = os.path.splitext(safe_filename)[0]
+        temp_docx_path = os.path.join(
+            temp_dir,
+            f"converted_{base_name}.docx"
+        )
+        
+        # 根据操作系统选择转换方式
+        if platform.system() == "Windows":
+            return self._convert_doc_to_docx_windows(doc_path, temp_docx_path)
+        else:
+            return self._convert_doc_to_docx_linux(doc_path, temp_docx_path)
+    
+    def _convert_doc_to_docx_windows(self, doc_path: str, output_path: str) -> str:
+        """Windows下使用pywin32转换.doc文件"""
         try:
             import win32com.client
         except ImportError:
@@ -60,15 +86,6 @@ class DocumentParser:
             )
         
         try:
-            # 创建临时 .docx 文件
-            temp_dir = tempfile.gettempdir()
-            # 使用安全的文件名（移除特殊字符，避免路径问题）
-            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', os.path.basename(doc_path))
-            temp_docx_path = os.path.join(
-                temp_dir,
-                f"converted_{safe_filename}.docx"
-            )
-            
             # 使用 Word COM 接口转换
             word_app = win32com.client.Dispatch("Word.Application")
             word_app.Visible = False
@@ -80,7 +97,7 @@ class DocumentParser:
                 
                 # 保存为 .docx 格式
                 doc.SaveAs2(
-                    FileName=os.path.abspath(temp_docx_path),
+                    FileName=os.path.abspath(output_path),
                     FileFormat=16  # wdFormatXMLDocument = 16 (.docx)
                 )
                 
@@ -88,9 +105,9 @@ class DocumentParser:
                 word_app.Quit()
                 
                 # 保存临时文件路径，用于后续清理
-                self._temp_docx_path = temp_docx_path
+                self._temp_docx_path = output_path
                 
-                return temp_docx_path
+                return output_path
                 
             except Exception as e:
                 try:
@@ -107,6 +124,126 @@ class DocumentParser:
             raise ValueError(
                 f"无法处理 .doc 格式文件：{str(e)}。"
                 "请确保已安装 Microsoft Word，或手动将文件转换为 .docx 格式。"
+            )
+    
+    def _convert_doc_to_docx_linux(self, doc_path: str, output_path: str) -> str:
+        """Linux下使用LibreOffice转换.doc文件"""
+        import subprocess
+        
+        try:
+            # 获取输出目录
+            output_dir = os.path.dirname(output_path)
+            
+            # 确保输出目录存在
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 使用LibreOffice headless模式转换
+            # --headless: 无界面模式
+            # --convert-to docx: 转换为docx格式
+            # --outdir: 输出目录
+            # --nodefault: 不启动默认文档
+            cmd = [
+                "libreoffice",
+                "--headless",
+                "--nodefault",
+                "--nolockcheck",
+                "--nologo",
+                "--convert-to", "docx",
+                "--outdir", output_dir,
+                doc_path
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,  # 120秒超时（大文件可能需要更长时间）
+                env=dict(os.environ, HOME="/tmp")  # 设置HOME避免LibreOffice配置问题
+            )
+            
+            # LibreOffice即使成功也可能返回非0退出码，所以主要检查文件是否生成
+            # 但如果有明显的错误信息，还是抛出异常
+            if result.returncode != 0 and "error" in result.stderr.lower():
+                raise subprocess.CalledProcessError(
+                    result.returncode,
+                    cmd,
+                    result.stderr
+                )
+            
+            # LibreOffice输出的文件名是基于输入文件名生成的（移除扩展名后加.docx）
+            input_basename = os.path.splitext(os.path.basename(doc_path))[0]
+            # 清理文件名中的特殊字符（LibreOffice可能会处理）
+            safe_basename = re.sub(r'[<>:"/\\|?*]', '_', input_basename)
+            
+            # 尝试查找实际生成的文件（可能有多种变体）
+            possible_files = [
+                os.path.join(output_dir, f"{input_basename}.docx"),
+                os.path.join(output_dir, f"{safe_basename}.docx"),
+                os.path.join(output_dir, os.path.basename(doc_path).replace('.doc', '.docx').replace('.DOC', '.docx')),
+            ]
+            
+            # 如果都不存在，列出目录中所有.docx文件
+            generated_file = None
+            for possible_file in possible_files:
+                if os.path.exists(possible_file):
+                    generated_file = possible_file
+                    break
+            
+            # 如果还是没找到，搜索输出目录中的所有.docx文件
+            if not generated_file:
+                for file in os.listdir(output_dir):
+                    if file.endswith('.docx') and file.startswith(input_basename[:10]):  # 至少前10个字符匹配
+                        generated_file = os.path.join(output_dir, file)
+                        break
+            
+            if not generated_file:
+                # 最后尝试：查找最近生成的.docx文件
+                docx_files = [f for f in os.listdir(output_dir) if f.endswith('.docx')]
+                if docx_files:
+                    # 按修改时间排序，取最新的
+                    docx_files.sort(key=lambda f: os.path.getmtime(os.path.join(output_dir, f)), reverse=True)
+                    generated_file = os.path.join(output_dir, docx_files[0])
+            
+            if not generated_file or not os.path.exists(generated_file):
+                error_msg = f"LibreOffice转换完成，但未找到生成的.docx文件。"
+                if result.stderr:
+                    error_msg += f" 错误信息: {result.stderr[:200]}"
+                raise ValueError(error_msg)
+            
+            # 如果生成的文件名与期望的不同，重命名
+            if generated_file != output_path:
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+                os.rename(generated_file, output_path)
+            
+            # 验证文件确实存在且不为空
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                raise ValueError("转换后的.docx文件为空或不存在")
+            
+            # 保存临时文件路径，用于后续清理
+            self._temp_docx_path = output_path
+            
+            return output_path
+            
+        except subprocess.TimeoutExpired:
+            raise ValueError(
+                "转换.doc文件超时，文件可能过大或已损坏。"
+                "请尝试手动将文件转换为.docx格式。"
+            )
+        except FileNotFoundError:
+            raise ValueError(
+                "无法处理 .doc 格式文件：未找到LibreOffice。"
+                "请确保已安装LibreOffice（在Docker容器中应已自动安装）。"
+            )
+        except subprocess.CalledProcessError as e:
+            raise ValueError(
+                f"无法将 .doc 文件转换为 .docx 格式：{e.stderr or str(e)}。"
+                "请确保LibreOffice已正确安装，或手动将文件转换为 .docx 格式。"
+            )
+        except Exception as e:
+            raise ValueError(
+                f"无法处理 .doc 格式文件：{str(e)}。"
+                "请确保LibreOffice已正确安装，或手动将文件转换为 .docx 格式。"
             )
     
     def _cleanup_temp_file(self):
