@@ -394,37 +394,46 @@ class XMindGenerator:
         children = ET.SubElement(parent_topic, 'children')
         topics_container = ET.SubElement(children, 'topics', {'type': 'attached'})
         
-        # 先添加两个相同的功能名称子节点
+        # 添加第一个同名子节点
         function_name = function.name if function.name else ""
         if function_name:
-            self._create_topic_element(topics_container, function_name)
-            self._create_topic_element(topics_container, function_name)
-        
-        # 添加固定子节点：业务流程、业务规则、页面控制、数据验证
-        page_control_topic = None
-        for title in ["业务流程", "业务规则", "页面控制", "数据验证"]:
-            topic_elem = self._create_topic_element(topics_container, title)
-            if title == "页面控制":
-                page_control_topic = topic_elem
-        
-        # 将输入输出要素添加到页面控制节点下
-        if page_control_topic:
-            # 为页面控制创建children和topics容器
-            page_control_children = ET.SubElement(page_control_topic, 'children')
-            page_control_topics = ET.SubElement(page_control_children, 'topics', {'type': 'attached'})
+            # 创建第一个同名子节点
+            first_named_topic = self._create_topic_element(topics_container, function_name)
             
-            # 添加输入要素（按序号排序，节点名称前加"输入-"）
-            if function.input_elements:
-                sorted_inputs = sorted(function.input_elements, key=lambda x: x.index)
-                for elem in sorted_inputs:
-                    if elem:
-                        input_text = self._format_input_element(elem)
-                        self._create_topic_element(page_control_topics, f"输入-{input_text}")
+            # 在第一个同名子节点下创建第二个同名子节点（嵌套）
+            first_children = ET.SubElement(first_named_topic, 'children')
+            first_topics_container = ET.SubElement(first_children, 'topics', {'type': 'attached'})
+            second_named_topic = self._create_topic_element(first_topics_container, function_name)
             
-            # 添加输出要素（按序号排序，节点名称前加"输出-"）
-            if function.output_elements:
-                sorted_outputs = sorted(function.output_elements, key=lambda x: x.index)
-                for elem in sorted_outputs:
-                    if elem:
-                        output_text = self._format_output_element(elem)
-                        self._create_topic_element(page_control_topics, f"输出-{output_text}")
+            # 在第二个同名子节点下创建children和topics容器，用于添加固定子节点
+            second_children = ET.SubElement(second_named_topic, 'children')
+            second_topics_container = ET.SubElement(second_children, 'topics', {'type': 'attached'})
+            
+            # 添加固定子节点：业务流程、业务规则、页面控制、数据验证（添加到第二个同名子节点下）
+            page_control_topic = None
+            for title in ["业务流程", "业务规则", "页面控制", "数据验证"]:
+                topic_elem = self._create_topic_element(second_topics_container, title)
+                if title == "页面控制":
+                    page_control_topic = topic_elem
+            
+            # 将输入输出要素添加到页面控制节点下
+            if page_control_topic:
+                # 为页面控制创建children和topics容器
+                page_control_children = ET.SubElement(page_control_topic, 'children')
+                page_control_topics = ET.SubElement(page_control_children, 'topics', {'type': 'attached'})
+                
+                # 添加输入要素（按序号排序，节点名称前加"输入-"）
+                if function.input_elements:
+                    sorted_inputs = sorted(function.input_elements, key=lambda x: x.index)
+                    for elem in sorted_inputs:
+                        if elem:
+                            input_text = self._format_input_element(elem)
+                            self._create_topic_element(page_control_topics, f"输入-{input_text}")
+                
+                # 添加输出要素（按序号排序，节点名称前加"输出-"）
+                if function.output_elements:
+                    sorted_outputs = sorted(function.output_elements, key=lambda x: x.index)
+                    for elem in sorted_outputs:
+                        if elem:
+                            output_text = self._format_output_element(elem)
+                            self._create_topic_element(page_control_topics, f"输出-{output_text}")
