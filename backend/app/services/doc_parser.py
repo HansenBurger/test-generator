@@ -573,46 +573,62 @@ class DocumentParser:
         return None
     
     def _extract_all_components(self) -> List[ComponentInfo]:
-        """提取所有组件、任务、步骤信息：从'# 任务规则说明*（A阶段、B阶段）'部分提取"""
+        """提取所有组件、任务、步骤信息：从'# 任务规则说明*（A阶段、B阶段）'或'# 功能说明*（A阶段、B阶段）'部分提取"""
         components = []
-        exclude_keywords = ["任务规则说明", "输入输出", "业务流程", "业务规则",
+        exclude_keywords = ["任务规则说明", "功能说明", "输入输出", "业务流程", "业务规则",
                            "页面控制", "数据验证", "前置条件", "后置条件",
                            "任务-业务步骤/功能清单", "业务步骤/功能描述", "规则说明",
                            "错误处理", "权限说明", "用户操作注释"]
         
-        for i, para in enumerate(self.paragraphs):
-            text = para.text.strip()
+        # 先尝试查找"任务规则说明"，如果找不到再查找"功能说明"
+        section_keywords = ["任务规则说明", "功能说明"]
+        section_index = -1
+        section_keyword = None
+        
+        for keyword in section_keywords:
+            for i, para in enumerate(self.paragraphs):
+                text = para.text.strip()
+                
+                # 查找指定关键词的标题（一级标题）
+                if keyword in text and "（A阶段、B阶段）" in text:
+                    if self._is_heading(para, level=1):
+                        section_index = i
+                        section_keyword = keyword
+                        break
             
-            # 查找"任务规则说明*（A阶段、B阶段）"标题（一级标题）
-            if "任务规则说明" in text and "（A阶段、B阶段）" in text:
-                if self._is_heading(para, level=1):
-                    # 首先找到搜索的结束位置（下一个一级标题）
-                    end_index = len(self.paragraphs)  # 默认到文档末尾
-                    
-                    for j in range(i + 1, len(self.paragraphs)):
-                        next_para = self.paragraphs[j]
-                        next_text = next_para.text.strip()
-                        
-                        # 如果遇到下一个一级标题，停止搜索
-                        if self._is_heading(next_para, level=1) and "任务规则说明" not in next_text:
-                            end_index = j
-                            break
-                    
-                    # 在确定的范围内查找所有组件名称（二级标题：##级别）
-                    for j in range(i + 1, end_index):
-                        next_para = self.paragraphs[j]
-                        next_text = next_para.text.strip()
-                        
-                        # 检查是否是二级标题（组件名称）
-                        if self._is_heading(next_para, level=2):
-                            match = re.match(r"(.+?)\*?（A阶段、B阶段）", next_text)
-                            if match:
-                                component_name = match.group(1).strip()
-                                if component_name not in exclude_keywords:
-                                    # 提取该组件下的所有任务
-                                    tasks = self._extract_tasks(j + 1, component_name, exclude_keywords)
-                                    component = ComponentInfo(name=component_name, tasks=tasks)
-                                    components.append(component)
+            if section_index != -1:
+                break
+        
+        if section_index == -1:
+            return components
+        
+        # 首先找到搜索的结束位置（下一个一级标题）
+        end_index = len(self.paragraphs)  # 默认到文档末尾
+        
+        for j in range(section_index + 1, len(self.paragraphs)):
+            next_para = self.paragraphs[j]
+            next_text = next_para.text.strip()
+            
+            # 如果遇到下一个一级标题，停止搜索
+            if self._is_heading(next_para, level=1) and section_keyword not in next_text:
+                end_index = j
+                break
+        
+        # 在确定的范围内查找所有组件名称（二级标题：##级别）
+        for j in range(section_index + 1, end_index):
+            next_para = self.paragraphs[j]
+            next_text = next_para.text.strip()
+            
+            # 检查是否是二级标题（组件名称）
+            if self._is_heading(next_para, level=2):
+                match = re.match(r"(.+?)\*?（A阶段、B阶段）", next_text)
+                if match:
+                    component_name = match.group(1).strip()
+                    if component_name not in exclude_keywords:
+                        # 提取该组件下的所有任务
+                        tasks = self._extract_tasks(j + 1, component_name, exclude_keywords)
+                        component = ComponentInfo(name=component_name, tasks=tasks)
+                        components.append(component)
         
         return components
     
