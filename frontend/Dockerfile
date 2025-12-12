@@ -1,5 +1,5 @@
 # 前端 Dockerfile - 构建阶段
-FROM node:lts-alpine AS builder
+FROM node:20-slim AS builder
 
 WORKDIR /app
 
