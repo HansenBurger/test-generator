@@ -15,6 +15,7 @@ from app.models.schemas import (
     ParsedDocument, RequirementInfo, ActivityInfo, ComponentInfo,
     TaskInfo, StepInfo, InputElement, OutputElement, FunctionInfo
 )
+from app.utils.logger import parser_logger
 
 
 class DocumentParser:
@@ -22,6 +23,9 @@ class DocumentParser:
     
     def __init__(self, doc_path: str):
         self._temp_docx_path = None  # 用于存储临时转换的 .docx 文件路径
+        self.doc_path = doc_path
+        parser_logger.info(f"开始初始化文档解析器，文件路径: {doc_path}")
+        
         actual_doc_path = self._handle_doc_file(doc_path)
         
         try:
@@ -29,7 +33,11 @@ class DocumentParser:
             self.paragraphs = [p for p in self.doc.paragraphs]
             self.tables = self.doc.tables
             self.used_tables = set()  # 记录已使用的表格索引，避免重复使用
+            parser_logger.info(
+                f"文档加载成功 - 段落数: {len(self.paragraphs)}, 表格数: {len(self.tables)}"
+            )
         except Exception as e:
+            parser_logger.error(f"文档加载失败: {str(e)}", exc_info=True)
             # 清理临时文件
             self._cleanup_temp_file()
             raise
@@ -40,13 +48,18 @@ class DocumentParser:
         
         # 如果已经是 .docx 格式，直接返回
         if doc_path_obj.suffix.lower() == '.docx':
+            parser_logger.debug(f"文档格式为.docx，直接使用: {doc_path}")
             return doc_path
         
         # 如果是 .doc 格式，需要转换
         if doc_path_obj.suffix.lower() == '.doc':
-            return self._convert_doc_to_docx(doc_path)
+            parser_logger.info(f"检测到.doc格式文件，开始转换为.docx: {doc_path}")
+            converted_path = self._convert_doc_to_docx(doc_path)
+            parser_logger.info(f"文档转换完成: {converted_path}")
+            return converted_path
         
         # 其他格式，尝试直接打开（可能会失败）
+        parser_logger.warning(f"未知文件格式，尝试直接打开: {doc_path}")
         return doc_path
     
     def _convert_doc_to_docx(self, doc_path: str) -> str:
@@ -261,15 +274,35 @@ class DocumentParser:
     
     def parse(self) -> ParsedDocument:
         """解析文档主方法"""
+        parser_logger.info(f"开始解析文档: {self.doc_path}")
+        
         # 1. 识别文档类型
         doc_type = self._identify_document_type()
+        parser_logger.info(f"识别文档类型: {doc_type}")
         
-        if doc_type == "modeling":
-            return self._parse_modeling_document()
-        elif doc_type == "non_modeling":
-            return self._parse_non_modeling_document()
-        else:
-            raise ValueError("无法识别文档类型：未找到'用例版本控制信息'表或'文件受控信息'/'文档受控信息'表")
+        try:
+            if doc_type == "modeling":
+                parser_logger.info("开始解析建模需求文档")
+                result = self._parse_modeling_document()
+                parser_logger.info(
+                    f"建模需求文档解析成功 - 用例名称: {result.requirement_info.case_name if result.requirement_info else 'N/A'}"
+                )
+                return result
+            elif doc_type == "non_modeling":
+                parser_logger.info("开始解析非建模需求文档")
+                result = self._parse_non_modeling_document()
+                parser_logger.info(
+                    f"非建模需求文档解析成功 - 需求名称: {result.requirement_name or 'N/A'}, "
+                    f"功能数: {len(result.functions) if result.functions else 0}"
+                )
+                return result
+            else:
+                error_msg = "无法识别文档类型：未找到'用例版本控制信息'表或'文件受控信息'/'文档受控信息'表"
+                parser_logger.error(error_msg)
+                raise ValueError(error_msg)
+        except Exception as e:
+            parser_logger.error(f"文档解析失败: {str(e)}", exc_info=True)
+            raise
     
     def _identify_document_type(self) -> Optional[str]:
         """识别文档类型：建模需求或非建模需求"""

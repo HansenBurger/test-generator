@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: test-generator-backend
     ports:
-      - "8000:8000"
+      - "8001:8000"
     volumes:
       - ./backend:/app
       - backend_data:/app/uploads
@@ -31,7 +31,7 @@ services:
 volumes:
   backend_data:
 
+
 networks:
   test-generator-network:
     driver: bridge
-

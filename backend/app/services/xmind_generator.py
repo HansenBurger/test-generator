@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List
 from app.models.schemas import ParsedDocument, ActivityInfo, ComponentInfo, TaskInfo, StepInfo
+from app.utils.logger import generator_logger
 
 
 class XMindGenerator:
@@ -14,27 +15,64 @@ class XMindGenerator:
     
     def __init__(self, parsed_doc: ParsedDocument):
         self.parsed_doc = parsed_doc
+        doc_type = parsed_doc.document_type
+        if doc_type == "non_modeling":
+            doc_name = parsed_doc.requirement_name or "未知需求"
+        else:
+            doc_name = parsed_doc.requirement_info.case_name if parsed_doc.requirement_info else "未知用例"
+        generator_logger.info(f"初始化XMind生成器 - 文档类型: {doc_type}, 名称: {doc_name}")
     
     def generate(self) -> bytes:
         """生成XMind文件并返回字节流"""
-        # 创建内存中的ZIP文件
-        zip_buffer = io.BytesIO()
+        import time
+        start_time = time.time()
         
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # 创建content.xml
-            content_xml = self._create_content_xml()
-            zip_file.writestr('content.xml', content_xml.encode('utf-8'))
-            
-            # 创建meta.xml
-            meta_xml = self._create_meta_xml()
-            zip_file.writestr('META-INF/manifest.xml', meta_xml.encode('utf-8'))
-            
-            # 创建styles.xml（可选，用于样式）
-            styles_xml = self._create_styles_xml()
-            zip_file.writestr('styles.xml', styles_xml.encode('utf-8'))
+        doc_type = self.parsed_doc.document_type
+        if doc_type == "non_modeling":
+            doc_name = self.parsed_doc.requirement_name or "未知需求"
+        else:
+            doc_name = self.parsed_doc.requirement_info.case_name if self.parsed_doc.requirement_info else "未知用例"
         
-        zip_buffer.seek(0)
-        return zip_buffer.getvalue()
+        generator_logger.info(f"开始生成XMind文件 - 文档类型: {doc_type}, 名称: {doc_name}")
+        
+        try:
+            # 创建内存中的ZIP文件
+            zip_buffer = io.BytesIO()
+            
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                # 创建content.xml
+                generator_logger.debug("生成content.xml")
+                content_xml = self._create_content_xml()
+                zip_file.writestr('content.xml', content_xml.encode('utf-8'))
+                
+                # 创建meta.xml
+                generator_logger.debug("生成meta.xml")
+                meta_xml = self._create_meta_xml()
+                zip_file.writestr('META-INF/manifest.xml', meta_xml.encode('utf-8'))
+                
+                # 创建styles.xml（可选，用于样式）
+                generator_logger.debug("生成styles.xml")
+                styles_xml = self._create_styles_xml()
+                zip_file.writestr('styles.xml', styles_xml.encode('utf-8'))
+            
+            zip_buffer.seek(0)
+            result = zip_buffer.getvalue()
+            
+            elapsed_time = time.time() - start_time
+            file_size = len(result)
+            generator_logger.info(
+                f"XMind文件生成成功 - 文档名称: {doc_name}, "
+                f"文件大小: {file_size / 1024:.2f}KB, 耗时: {elapsed_time:.3f}秒"
+            )
+            
+            return result
+        except Exception as e:
+            elapsed_time = time.time() - start_time
+            generator_logger.error(
+                f"XMind文件生成失败 - 文档名称: {doc_name}, 耗时: {elapsed_time:.3f}秒, 错误: {str(e)}",
+                exc_info=True
+            )
+            raise
     
     def _create_content_xml(self) -> str:
         """创建content.xml内容"""

@@ -24,7 +24,33 @@ api.interceptors.response.use(
         return response.data
     },
     error => {
-        const message = error.response?.data?.detail || error.message || '请求失败'
+        // 处理不同类型的错误
+        let message = '请求失败'
+
+        if (error.response) {
+            // 服务器返回了错误响应
+            const status = error.response.status
+            const data = error.response.data
+
+            if (data?.detail) {
+                message = data.detail
+            } else if (data?.message) {
+                message = data.message
+            } else if (status === 404) {
+                message = '请求的资源不存在，请检查API路径是否正确'
+            } else if (status === 500) {
+                message = data?.detail || '服务器内部错误'
+            } else {
+                message = `请求失败 (状态码: ${status})`
+            }
+        } else if (error.request) {
+            // 请求已发出但没有收到响应
+            message = '无法连接到服务器，请检查网络连接或服务器是否运行'
+        } else {
+            // 其他错误
+            message = error.message || '请求失败'
+        }
+
         return Promise.reject(new Error(message))
     }
 )

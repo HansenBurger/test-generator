@@ -12,9 +12,15 @@ from typing import Optional
 from app.models.schemas import ParseResponse, ParsedDocument, GenerateOutlineRequest
 from app.services.doc_parser import DocumentParser
 from app.services.xmind_generator import XMindGenerator
+from app.utils.logger import api_logger, parser_logger, generator_logger
 from datetime import datetime
 
 router = APIRouter()
+
+@router.get("/health")
+async def health_check():
+    """健康检查端点"""
+    return {"status": "ok", "message": "API服务正常运行"}
 
 
 def sanitize_error_message(error_msg: str, filename: str) -> str:
@@ -58,8 +64,13 @@ async def parse_document(file: UploadFile = File(...)):
     """
     上传并解析Word文档
     """
+    import time
+    start_time = time.time()
+    api_logger.info(f"收到文档解析请求 - 文件名: {file.filename}, 文件大小: {file.size if hasattr(file, 'size') else 'unknown'}")
+    
     # 验证文件类型
     if not file.filename.endswith(('.doc', '.docx')):
+        api_logger.warning(f"不支持的文件类型 - 文件名: {file.filename}")
         return ParseResponse(
             success=False,
             message="不支持的文件类型，请上传Word文档（.doc或.docx）"
@@ -67,15 +78,53 @@ async def parse_document(file: UploadFile = File(...)):
     
     # 保存临时文件（根据实际上传的文件类型保存）
     file_ext = '.doc' if file.filename.endswith('.doc') else '.docx'
-    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+    tmp_path = None
+    try:
+        # 读取文件内容
         content = await file.read()
-        tmp_file.write(content)
-        tmp_path = tmp_file.name
+        if not content:
+            api_logger.warning(f"上传的文件为空 - 文件名: {file.filename}")
+            return ParseResponse(
+                success=False,
+                message="上传的文件为空，请检查文件是否正确"
+            )
+        
+        # 创建临时文件并写入
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+            tmp_file.write(content)
+            tmp_file.flush()  # 确保数据写入磁盘
+            os.fsync(tmp_file.fileno())  # 强制同步到磁盘
+            tmp_path = tmp_file.name
+        
+        # 验证文件是否成功写入
+        if not os.path.exists(tmp_path):
+            raise ValueError("临时文件创建失败")
+        
+        file_size = os.path.getsize(tmp_path)
+        if file_size == 0:
+            raise ValueError("临时文件写入失败，文件大小为0")
+        
+        api_logger.info(f"临时文件保存成功 - 文件名: {file.filename}, 路径: {tmp_path}, 大小: {file_size} 字节")
+    except Exception as e:
+        api_logger.error(f"保存临时文件失败 - 文件名: {file.filename}, 错误: {str(e)}", exc_info=True)
+        # 清理可能创建的临时文件
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+        return ParseResponse(
+            success=False,
+            message=f"文件上传失败: {str(e)}"
+        )
     
     try:
         # 解析文档
         parser = DocumentParser(tmp_path)
         parsed_doc = parser.parse()
+        
+        elapsed_time = time.time() - start_time
+        api_logger.info(f"文档解析成功 - 文件名: {file.filename}, 耗时: {elapsed_time:.3f}秒")
         
         return ParseResponse(
             success=True,
@@ -84,14 +133,18 @@ async def parse_document(file: UploadFile = File(...)):
         )
     except ValueError as e:
         # ValueError 通常是业务逻辑错误，直接返回
+        elapsed_time = time.time() - start_time
         error_msg = sanitize_error_message(str(e), file.filename)
+        api_logger.warning(f"文档解析失败（业务错误） - 文件名: {file.filename}, 错误: {error_msg}, 耗时: {elapsed_time:.3f}秒")
         return ParseResponse(
             success=False,
             message=error_msg
         )
     except Exception as e:
         # 其他异常，清理错误信息
+        elapsed_time = time.time() - start_time
         error_msg = sanitize_error_message(str(e), file.filename)
+        api_logger.error(f"文档解析失败（系统错误） - 文件名: {file.filename}, 错误: {error_msg}, 耗时: {elapsed_time:.3f}秒", exc_info=True)
         return ParseResponse(
             success=False,
             message=error_msg
@@ -107,6 +160,15 @@ async def generate_outline(request: GenerateOutlineRequest):
     """
     生成XMind测试大纲
     """
+    import time
+    start_time = time.time()
+    
+    doc_type = request.parsed_data.document_type
+    doc_name = request.parsed_data.requirement_name if doc_type == "non_modeling" else (
+        request.parsed_data.requirement_info.case_name if request.parsed_data.requirement_info else "未知"
+    )
+    api_logger.info(f"收到生成大纲请求 - 文档类型: {doc_type}, 名称: {doc_name}")
+    
     try:
         # 生成XMind文件
         generator = XMindGenerator(request.parsed_data)
@@ -122,6 +184,9 @@ async def generate_outline(request: GenerateOutlineRequest):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{case_name}-{timestamp}.xmind"
         
+        elapsed_time = time.time() - start_time
+        api_logger.info(f"大纲生成成功 - 文件名: {filename}, 耗时: {elapsed_time:.3f}秒")
+        
         # 返回文件流
         return StreamingResponse(
             io.BytesIO(xmind_bytes),
@@ -131,6 +196,8 @@ async def generate_outline(request: GenerateOutlineRequest):
             }
         )
     except Exception as e:
+        elapsed_time = time.time() - start_time
+        api_logger.error(f"大纲生成失败 - 文档名称: {doc_name}, 耗时: {elapsed_time:.3f}秒, 错误: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"生成大纲失败：{str(e)}")
 
 
@@ -139,6 +206,15 @@ async def generate_outline_from_json(parsed_data: ParsedDocument):
     """
     从JSON数据生成XMind测试大纲（便捷接口）
     """
+    import time
+    start_time = time.time()
+    
+    doc_type = parsed_data.document_type
+    doc_name = parsed_data.requirement_name if doc_type == "non_modeling" else (
+        parsed_data.requirement_info.case_name if parsed_data.requirement_info else "未知"
+    )
+    api_logger.info(f"收到从JSON生成大纲请求 - 文档类型: {doc_type}, 名称: {doc_name}")
+    
     try:
         # 生成XMind文件
         generator = XMindGenerator(parsed_data)
@@ -158,6 +234,9 @@ async def generate_outline_from_json(parsed_data: ParsedDocument):
         import urllib.parse
         encoded_filename = urllib.parse.quote(filename.encode('utf-8'))
         
+        elapsed_time = time.time() - start_time
+        api_logger.info(f"从JSON生成大纲成功 - 文件名: {filename}, 耗时: {elapsed_time:.3f}秒")
+        
         # 返回文件流
         return StreamingResponse(
             io.BytesIO(xmind_bytes),
@@ -169,6 +248,8 @@ async def generate_outline_from_json(parsed_data: ParsedDocument):
         )
     except Exception as e:
         import traceback
+        elapsed_time = time.time() - start_time
         error_detail = f"生成大纲失败：{str(e)}\n{traceback.format_exc()}"
+        api_logger.error(f"从JSON生成大纲失败 - 文档名称: {doc_name}, 耗时: {elapsed_time:.3f}秒, 错误: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=error_detail)
 
