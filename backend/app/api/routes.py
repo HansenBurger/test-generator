@@ -79,6 +79,7 @@ async def parse_document(file: UploadFile = File(...)):
     # 保存临时文件（根据实际上传的文件类型保存）
     file_ext = '.doc' if file.filename.endswith('.doc') else '.docx'
     tmp_path = None
+    tmp_file = None
     try:
         # 读取文件内容
         content = await file.read()
@@ -90,11 +91,14 @@ async def parse_document(file: UploadFile = File(...)):
             )
         
         # 创建临时文件并写入
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=file_ext)
+        tmp_path = tmp_file.name  # 在写入之前获取路径，确保异常时也能清理
+        try:
             tmp_file.write(content)
             tmp_file.flush()  # 确保数据写入磁盘
             os.fsync(tmp_file.fileno())  # 强制同步到磁盘
-            tmp_path = tmp_file.name
+        finally:
+            tmp_file.close()  # 确保文件句柄被关闭
         
         # 验证文件是否成功写入
         if not os.path.exists(tmp_path):
@@ -180,7 +184,9 @@ async def generate_outline(request: GenerateOutlineRequest):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{requirement_name}-{timestamp}.xmind"
         else:
-            case_name = request.parsed_data.requirement_info.case_name or "测试大纲"
+            case_name = (request.parsed_data.requirement_info.case_name 
+                        if request.parsed_data.requirement_info 
+                        else None) or "测试大纲"
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{case_name}-{timestamp}.xmind"
         
@@ -226,7 +232,9 @@ async def generate_outline_from_json(parsed_data: ParsedDocument):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{requirement_name}-{timestamp}.xmind"
         else:
-            case_name = parsed_data.requirement_info.case_name or "测试大纲"
+            case_name = (parsed_data.requirement_info.case_name 
+                        if parsed_data.requirement_info 
+                        else None) or "测试大纲"
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{case_name}-{timestamp}.xmind"
         
