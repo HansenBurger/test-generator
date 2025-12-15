@@ -222,7 +222,7 @@ main() {
             view_status
             print_info "部署完成！"
             print_info "前端访问地址: http://localhost:3000"
-            print_info "后端API地址: http://localhost:8000"
+            print_info "后端API地址: http://localhost:8001"
             ;;
         *)
             # 交互式菜单
@@ -258,7 +258,7 @@ main() {
                         view_status
                         print_info "部署完成！"
                         print_info "前端访问地址: http://localhost:3000"
-                        print_info "后端API地址: http://localhost:8000"
+                        print_info "后端API地址: http://localhost:8001"
                         ;;
                     9)
                         clean

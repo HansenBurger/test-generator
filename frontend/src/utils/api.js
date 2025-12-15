@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const api = axios.create({
     baseURL: '/api',
-    timeout: 60000, // 60秒超时，因为文档解析可能需要较长时间
+    timeout: 300000, // 300秒（5分钟）超时，因为大文件转换可能需要较长时间
     headers: {
         'Content-Type': 'application/json'
     }
@@ -56,18 +56,20 @@ api.interceptors.response.use(
 )
 
 /**
- * 上传并解析Word文档
+ * 上传并解析Word文档（已废弃，请使用 parseDocumentAsync）
+ * @deprecated 请使用 parseDocumentAsync 和 pollTaskUntilComplete
  * @param {File} file - Word文档文件
  * @returns {Promise} 解析结果
  */
 export const parseDocument = (file) => {
-    const formData = new FormData()
-    formData.append('file', file)
-
-    return api.post('/parse-doc', formData, {
-        headers: {
-            'Content-Type': 'multipart/form-data'
+    // 为了向后兼容保留，但内部使用异步方式
+    console.warn('parseDocument 已废弃，请使用 parseDocumentAsync')
+    return parseDocumentAsync(file).then(taskResponse => {
+        if (!taskResponse.success) {
+            throw new Error(taskResponse.message)
         }
+        // 轮询直到完成（最多60秒）
+        return pollTaskUntilComplete(taskResponse.task_id, null, 1000, 60000)
     })
 }
 
@@ -93,6 +95,80 @@ export const generateOutlineFromJson = (parsedData) => {
     return api.post('/generate-outline-from-json', parsedData, {
         responseType: 'blob'
     })
+}
+
+/**
+ * 异步上传并解析Word文档
+ * @param {File} file - Word文档文件
+ * @returns {Promise} 任务创建响应，包含task_id
+ */
+export const parseDocumentAsync = (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    return api.post('/parse-doc-async', formData, {
+        headers: {
+            'Content-Type': 'multipart/form-data'
+        }
+    })
+}
+
+/**
+ * 查询任务状态
+ * @param {string} taskId - 任务ID
+ * @returns {Promise} 任务状态
+ */
+export const getTaskStatus = (taskId) => {
+    return api.get(`/task/${taskId}`)
+}
+
+/**
+ * 轮询任务状态直到完成
+ * @param {string} taskId - 任务ID
+ * @param {Function} onProgress - 进度回调函数 (progress) => {}
+ * @param {number} interval - 轮询间隔（毫秒），默认1000ms
+ * @param {number} timeout - 超时时间（毫秒），默认300000ms（5分钟）
+ * @returns {Promise} 任务结果
+ */
+export const pollTaskUntilComplete = async (taskId, onProgress = null, interval = 1000, timeout = 300000) => {
+    const startTime = Date.now()
+    
+    while (true) {
+        // 检查超时
+        if (Date.now() - startTime > timeout) {
+            throw new Error('任务轮询超时')
+        }
+        
+        try {
+            const status = await getTaskStatus(taskId)
+            
+            // 调用进度回调
+            if (onProgress) {
+                onProgress(status.progress, status.status)
+            }
+            
+            // 检查任务状态
+            if (status.status === 'completed') {
+                if (status.result && status.result.success) {
+                    return status.result
+                } else {
+                    throw new Error(status.result?.message || status.error || '任务完成但结果失败')
+                }
+            } else if (status.status === 'failed') {
+                throw new Error(status.error || '任务处理失败')
+            }
+            
+            // 等待后继续轮询
+            await new Promise(resolve => setTimeout(resolve, interval))
+            
+        } catch (error) {
+            // 如果是404，任务不存在
+            if (error.response && error.response.status === 404) {
+                throw new Error('任务不存在')
+            }
+            throw error
+        }
+    }
 }
 
 export default api

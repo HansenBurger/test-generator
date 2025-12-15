@@ -32,13 +32,38 @@
         </template>
       </el-upload>
       
+      <!-- .doc 文件提示信息 -->
+      <el-alert
+        v-if="hasDocFiles && !hasProcessed"
+        title="提示"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-top: 15px;"
+      >
+        <template #default>
+          <div>
+            <p style="margin: 0 0 8px 0;">
+              <strong>检测到 .doc 格式文件</strong>
+            </p>
+            <p style="margin: 0; font-size: 13px; line-height: 1.6;">
+              .doc 文件需要转换，处理时间较长（可能需要1-2分钟）。<br>
+              建议：<strong style="color: #409eff;">优先将 .doc 文件转换为 .docx 格式</strong>后再上传，可大幅提升处理速度（通常只需几秒）。
+            </p>
+            <p style="margin: 8px 0 0 0; font-size: 12px; color: #909399;">
+              转换方法：在 Microsoft Word 中打开 .doc 文件，选择"另存为"，格式选择"Word 文档 (*.docx)"
+            </p>
+          </div>
+        </template>
+      </el-alert>
+      
       <!-- 处理进度 -->
-      <div v-if="processingFiles.length > 0" class="processing-status">
+      <div v-if="loading || processingFiles.length > 0" class="processing-status">
         <el-progress
-          :percentage="processingProgress"
+          :percentage="parseProgress || processingProgress"
           :status="processingStatus"
         />
-        <p class="processing-text">{{ processingText }}</p>
+        <p class="processing-text">{{ parseStatus || processingText }}</p>
       </div>
     </el-card>
     
@@ -234,7 +259,7 @@
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled, Document, Close, View } from '@element-plus/icons-vue'
-import { parseDocument, generateOutlineFromJson } from '../utils/api'
+import { parseDocument, parseDocumentAsync, pollTaskUntilComplete, generateOutlineFromJson } from '../utils/api'
 
 const uploadRef = ref(null)
 const fileList = ref([])
@@ -248,10 +273,21 @@ const hasProcessed = ref(false) // 是否已处理过文件
 const processingFiles = ref([]) // 正在处理的文件列表
 const currentProcessingIndex = ref(0) // 当前处理的文件索引
 const pendingFiles = ref([]) // 待生成的文件数据
+const parseProgress = ref(0) // 解析进度 0-100
+const parseStatus = ref('') // 解析状态文本
 
 // 计算当前文件数量（用于按钮状态）
 const fileCount = computed(() => {
   return uploadRef.value?.fileList?.length || fileList.value.length || 0
+})
+
+// 检查是否有 .doc 文件
+const hasDocFiles = computed(() => {
+  const files = uploadRef.value?.fileList || fileList.value
+  return files.some(file => {
+    const fileName = file.name || file.raw?.name || ''
+    return fileName.toLowerCase().endsWith('.doc')
+  })
 })
 
 // 计算处理进度
@@ -347,8 +383,10 @@ const handleParseAndGenerate = async () => {
   currentProcessingIndex.value = 0
   pendingFiles.value = []
 
-  // 逐个解析文件，显示预览
+  // 逐个解析文件，显示预览（使用异步接口）
   loading.value = true
+  parseProgress.value = 0
+  parseStatus.value = '正在提交任务...'
   let hasError = false
   let firstErrorFile = ''
   let firstErrorMessage = ''
@@ -358,8 +396,33 @@ const handleParseAndGenerate = async () => {
     const file = validFiles[i].raw || validFiles[i]
 
     try {
-      // 解析文档
-      const response = await parseDocument(file)
+      // 提交异步任务
+      parseStatus.value = `正在提交任务: ${validFiles[i].name}`
+      const taskResponse = await parseDocumentAsync(file)
+      
+      if (!taskResponse.success) {
+        throw new Error(taskResponse.message || '任务提交失败')
+      }
+      
+      const taskId = taskResponse.task_id
+      parseStatus.value = `正在解析: ${validFiles[i].name}`
+      
+      // 轮询任务状态直到完成
+      const response = await pollTaskUntilComplete(
+        taskId,
+        (progress, status) => {
+          // 更新进度（考虑多个文件的情况）
+          const baseProgress = (i / validFiles.length) * 100
+          const fileProgress = (progress * 100) / validFiles.length
+          parseProgress.value = Math.round(baseProgress + fileProgress)
+          
+          if (status === 'processing') {
+            parseStatus.value = `正在解析: ${validFiles[i].name} (${Math.round(progress * 100)}%)`
+          }
+        },
+        1000, // 1秒轮询一次
+        300000 // 5分钟超时
+      )
       
       if (!response.success) {
         throw new Error(response.message || '解析失败')
@@ -375,6 +438,8 @@ const handleParseAndGenerate = async () => {
         file: validFiles[i].name,
         data: response.data
       })
+      
+      parseProgress.value = ((i + 1) / validFiles.length) * 100
     } catch (error) {
       // 记录第一个错误
       if (!hasError) {
@@ -389,6 +454,8 @@ const handleParseAndGenerate = async () => {
   }
 
   loading.value = false
+  parseProgress.value = 0
+  parseStatus.value = ''
 
   // 如果发生错误，清除文件并显示错误信息
   if (hasError) {

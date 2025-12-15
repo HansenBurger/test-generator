@@ -1,5 +1,5 @@
 # 前端 Dockerfile - 构建阶段
-FROM node:lts-alpine AS builder
+FROM node:lts AS builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ RUN npm config set registry https://registry.npmmirror.com
 COPY package*.json ./
 
 # 安装依赖
-RUN npm ci
+RUN npm ci --prefer-offline --no-audit
 
 # 复制源代码
 COPY . .

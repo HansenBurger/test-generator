@@ -140,7 +140,103 @@ class DocumentParser:
             )
     
     def _convert_doc_to_docx_linux(self, doc_path: str, output_path: str) -> str:
-        """Linux下使用LibreOffice转换.doc文件"""
+        """Linux下转换.doc文件
+        
+        优先使用antiword + pandoc（更快），失败则回退到LibreOffice
+        """
+        # 首先尝试使用antiword + pandoc（更快）
+        try:
+            return self._convert_doc_to_docx_antiword_pandoc(doc_path, output_path)
+        except Exception as e:
+            parser_logger.warning(f"antiword+pandoc转换失败，回退到LibreOffice: {str(e)}")
+            # 回退到LibreOffice
+            return self._convert_doc_to_docx_libreoffice(doc_path, output_path)
+    
+    def _convert_doc_to_docx_antiword_pandoc(self, doc_path: str, output_path: str) -> str:
+        """使用antiword + pandoc转换（更快，保留章节和表格结构）"""
+        import subprocess
+        
+        try:
+            # 确保输出目录存在
+            output_dir = os.path.dirname(output_path)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 方法：使用antiword提取文本（保留表格结构），然后pandoc转换为docx
+            # antiword可以保留基本的表格结构（通过制表符）
+            parser_logger.info(f"使用antiword提取文本: {doc_path}")
+            
+            # 使用antiword提取文本（-m参数保留表格格式）
+            txt_path = output_path.replace('.docx', '.txt')
+            antiword_result = subprocess.run(
+                ["antiword", "-m", "UTF-8.txt", doc_path],  # -m指定映射文件，UTF-8.txt保留格式
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if antiword_result.returncode != 0:
+                # 如果-m参数失败，尝试不带参数
+                parser_logger.warning("antiword -m参数失败，尝试普通模式")
+                antiword_result = subprocess.run(
+                    ["antiword", doc_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                
+                if antiword_result.returncode != 0:
+                    raise ValueError(f"antiword提取失败: {antiword_result.stderr}")
+            
+            # 保存文本（保留表格的制表符结构）
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                f.write(antiword_result.stdout)
+            
+            # 步骤2: 使用pandoc将文本转换为docx（保留表格）
+            parser_logger.info(f"使用pandoc转换文本到docx: {txt_path}")
+            pandoc_result = subprocess.run(
+                ["pandoc", "-f", "plain", "-t", "docx", "--wrap=none", "-o", output_path, txt_path],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            # 清理临时文件
+            if os.path.exists(txt_path):
+                try:
+                    os.unlink(txt_path)
+                except:
+                    pass
+            
+            if pandoc_result.returncode != 0:
+                raise ValueError(f"pandoc转换失败: {pandoc_result.stderr}")
+            
+            # 验证输出文件
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                raise ValueError("转换后的.docx文件为空或不存在")
+            
+            parser_logger.info(f"antiword+pandoc转换成功: {output_path}")
+            self._temp_docx_path = output_path
+            return output_path
+            
+        except FileNotFoundError as e:
+            raise ValueError(
+                "无法处理 .doc 格式文件：未找到antiword或pandoc。"
+                "请确保已安装antiword和pandoc（在Docker容器中应已自动安装）。"
+            )
+        except subprocess.TimeoutExpired:
+            raise ValueError(
+                "转换.doc文件超时，文件可能过大或已损坏。"
+                "请尝试手动将文件转换为.docx格式。"
+            )
+        except Exception as e:
+            raise ValueError(f"antiword+pandoc转换失败: {str(e)}")
+    
+    def _convert_doc_to_docx_libreoffice(self, doc_path: str, output_path: str) -> str:
+        """使用LibreOffice转换（备选方案）"""
+        return self._convert_doc_to_docx_cli(doc_path, output_path)
+    
+    def _convert_doc_to_docx_cli(self, doc_path: str, output_path: str) -> str:
+        """使用命令行模式转换（备选方案）"""
         import subprocess
         
         try:
@@ -150,28 +246,39 @@ class DocumentParser:
             # 确保输出目录存在
             os.makedirs(output_dir, exist_ok=True)
             
-            # 使用LibreOffice headless模式转换
-            # --headless: 无界面模式
-            # --convert-to docx: 转换为docx格式
-            # --outdir: 输出目录
-            # --nodefault: 不启动默认文档
+            # 使用soffice批处理模式
+            # 使用优化的批处理模式，移除--safe-mode（可能反而更慢）
+            # 使用最少的参数，减少初始化时间
             cmd = [
-                "libreoffice",
+                "soffice",
                 "--headless",
+                "--invisible",
                 "--nodefault",
                 "--nolockcheck",
                 "--nologo",
-                "--convert-to", "docx",
+                "--norestore",
+                "--convert-to", "docx:MS Word 2007 XML",  # 明确指定输出格式
                 "--outdir", output_dir,
                 doc_path
             ]
+            
+            # 优化环境变量，减少LibreOffice初始化时间
+            env = dict(os.environ)
+            env.update({
+                "HOME": "/tmp",
+                "SAL_USE_VCLPLUGIN": "headless",  # 强制使用headless插件
+                "SAL_DISABLE_OPENCL": "1",  # 禁用OpenCL加速（减少初始化）
+                "SAL_DISABLE_OPENCL_CLEANUP": "1",  # 禁用OpenCL清理
+                "OOO_DISABLE_RECOVERY": "1",  # 禁用恢复功能
+            })
             
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,  # 120秒超时（大文件可能需要更长时间）
-                env=dict(os.environ, HOME="/tmp")  # 设置HOME避免LibreOffice配置问题
+                timeout=300,  # 300秒超时
+                env=env,
+                preexec_fn=lambda: os.nice(10) if hasattr(os, 'nice') else None  # 降低优先级，避免阻塞
             )
             
             # LibreOffice即使成功也可能返回非0退出码，所以主要检查文件是否生成

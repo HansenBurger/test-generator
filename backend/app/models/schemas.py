@@ -95,3 +95,23 @@ class GenerateOutlineRequest(BaseModel):
     """生成大纲请求"""
     parsed_data: ParsedDocument
 
+
+class TaskCreateResponse(BaseModel):
+    """任务创建响应"""
+    success: bool
+    task_id: str
+    message: str
+
+
+class TaskStatusResponse(BaseModel):
+    """任务状态响应"""
+    task_id: str
+    status: str  # pending, processing, completed, failed
+    filename: str
+    progress: float  # 0.0 - 1.0
+    created_at: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error: Optional[str] = None
+    result: Optional[ParseResponse] = None
+

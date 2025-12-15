@@ -31,6 +31,13 @@ app.include_router(router, prefix="/api")
 # 记录应用启动
 logger.info("FastAPI应用启动")
 
+# 启动LibreOffice守护进程（用于加速.doc文件转换）
+try:
+    from app.utils.libreoffice_daemon import libreoffice_daemon
+    logger.info("LibreOffice守护进程管理器已初始化")
+except Exception as e:
+    logger.warning(f"LibreOffice守护进程初始化失败: {str(e)}，将使用普通模式")
+
 @app.get("/")
 async def root():
     return {"message": "测试大纲生成器API服务运行中"}

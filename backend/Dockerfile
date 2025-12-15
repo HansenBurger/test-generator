@@ -22,9 +22,11 @@ RUN if [ -f /etc/apt/sources.list ]; then \
         find /etc/apt/sources.list.d -name "*.list" -exec sed -i 's|deb.debian.org|mirrors.aliyun.com|g' {} \; 2>/dev/null || true; \
     fi
 
-# 安装系统依赖（包括LibreOffice用于.doc文件转换）
+# 安装系统依赖（优先使用antiword + pandoc，LibreOffice作为备选）
 RUN apt-get update && apt-get install -y \
     gcc \
+    antiword \
+    pandoc \
     libreoffice \
     libreoffice-writer \
     --no-install-recommends \
@@ -47,7 +49,7 @@ RUN pip install --upgrade pip && \
 COPY . .
 
 # 暴露端口
-EXPOSE 8000
+EXPOSE 8001
 
 # 启动命令
 CMD ["python", "main.py"]
