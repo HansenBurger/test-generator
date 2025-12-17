@@ -180,11 +180,11 @@
                         class="step-item"
                       >
                         <p><strong>步骤:</strong> {{ step.name }}</p>
-                        <p v-if="step.input_elements?.length">
-                          <strong>输入要素:</strong> {{ step.input_elements.length }} 个
+                        <p>
+                          <strong>输入要素:</strong> {{ step.input_elements?.length || 0 }} 个
                         </p>
-                        <p v-if="step.output_elements?.length">
-                          <strong>输出要素:</strong> {{ step.output_elements.length }} 个
+                        <p>
+                          <strong>输出要素:</strong> {{ step.output_elements?.length || 0 }} 个
                         </p>
                       </div>
                     </div>
