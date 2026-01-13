@@ -49,34 +49,56 @@ class DailyRotatingFileHandler(TimedRotatingFileHandler):
         if not self.base_path.exists():
             return
         
-        # 获取文件修改时间
-        file_mtime = datetime.fromtimestamp(self.base_path.stat().st_mtime)
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        # 如果文件是今天创建的，不需要归档
-        if file_mtime >= today:
-            return
-        
-        # 获取文件创建日期（使用修改时间作为参考）
-        file_date = file_mtime.date()
-        
-        # 创建归档路径：yyyy/MM/yyyy-MM-dd.log
-        archive_dir = self.log_dir / file_date.strftime("%Y") / file_date.strftime("%m")
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        
-        archive_filename = file_date.strftime("%Y-%m-%d.log")
-        archive_path = archive_dir / archive_filename
-        
-        # 如果归档文件已存在，追加内容
-        if archive_path.exists():
-            with open(self.base_path, 'r', encoding='utf-8') as src:
-                content = src.read()
-            with open(archive_path, 'a', encoding='utf-8') as dst:
-                dst.write(content)
-            self.base_path.unlink()
-        else:
-            # 移动文件到归档目录
-            self.base_path.rename(archive_path)
+        try:
+            # 获取文件修改时间
+            file_mtime = datetime.fromtimestamp(self.base_path.stat().st_mtime)
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # 如果文件是今天创建的，不需要归档
+            if file_mtime >= today:
+                return
+            
+            # 获取文件创建日期（使用修改时间作为参考）
+            file_date = file_mtime.date()
+            
+            # 创建归档路径：yyyy/MM/yyyy-MM-dd.log
+            archive_dir = self.log_dir / file_date.strftime("%Y") / file_date.strftime("%m")
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            
+            archive_filename = file_date.strftime("%Y-%m-%d.log")
+            archive_path = archive_dir / archive_filename
+            
+            # 如果归档文件已存在，追加内容
+            if archive_path.exists():
+                try:
+                    with open(self.base_path, 'r', encoding='utf-8') as src:
+                        content = src.read()
+                    with open(archive_path, 'a', encoding='utf-8') as dst:
+                        dst.write(content)
+                    self.base_path.unlink()
+                except (PermissionError, OSError) as e:
+                    # 文件被占用，跳过归档
+                    print(f"警告: 无法归档日志文件 {self.base_path}，文件可能被其他进程占用: {e}")
+            else:
+                # 移动文件到归档目录
+                try:
+                    self.base_path.rename(archive_path)
+                except (PermissionError, OSError) as e:
+                    # 文件被占用，尝试使用复制+删除的方式
+                    try:
+                        import shutil
+                        shutil.copy2(self.base_path, archive_path)
+                        # 如果复制成功，尝试删除原文件（如果失败也没关系，下次启动时会再尝试）
+                        try:
+                            self.base_path.unlink()
+                        except (PermissionError, OSError):
+                            pass
+                    except Exception as copy_error:
+                        # 如果复制也失败，跳过归档
+                        print(f"警告: 无法归档日志文件 {self.base_path}，文件可能被其他进程占用: {e}")
+        except Exception as e:
+            # 处理任何其他异常，避免影响服务启动
+            print(f"警告: 归档日志文件时发生错误: {e}")
     
     def doRollover(self):
         """
@@ -97,16 +119,34 @@ class DailyRotatingFileHandler(TimedRotatingFileHandler):
         
         # 如果当前日志文件存在，移动到归档目录
         if self.base_path.exists():
-            if archive_path.exists():
-                # 如果归档文件已存在，追加内容
-                with open(self.base_path, 'r', encoding='utf-8') as src:
-                    content = src.read()
-                with open(archive_path, 'a', encoding='utf-8') as dst:
-                    dst.write(content)
-                self.base_path.unlink()
-            else:
-                # 移动文件到归档目录
-                self.base_path.rename(archive_path)
+            try:
+                if archive_path.exists():
+                    # 如果归档文件已存在，追加内容
+                    with open(self.base_path, 'r', encoding='utf-8') as src:
+                        content = src.read()
+                    with open(archive_path, 'a', encoding='utf-8') as dst:
+                        dst.write(content)
+                    try:
+                        self.base_path.unlink()
+                    except (PermissionError, OSError):
+                        # 文件被占用，无法删除，但已经复制了内容
+                        pass
+                else:
+                    # 移动文件到归档目录
+                    try:
+                        self.base_path.rename(archive_path)
+                    except (PermissionError, OSError):
+                        # 文件被占用，尝试使用复制+删除的方式
+                        import shutil
+                        shutil.copy2(self.base_path, archive_path)
+                        # 尝试删除原文件（如果失败也没关系）
+                        try:
+                            self.base_path.unlink()
+                        except (PermissionError, OSError):
+                            pass
+            except Exception as e:
+                # 处理任何异常，避免影响日志轮转
+                print(f"警告: 日志轮转时发生错误: {e}")
         
         # 创建新的日志文件
         if not self.delay:

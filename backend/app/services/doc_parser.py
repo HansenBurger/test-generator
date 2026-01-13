@@ -1577,7 +1577,7 @@ class DocumentParser:
         
         return elements
     
-    def _find_table_after_marker_in_range(self, marker_index: int, end_index: int, is_input: bool, is_document_end: bool = False) -> List:
+    def _find_table_after_marker_in_range(self, marker_index: int, end_index: int, is_input: bool, is_document_end: bool = False, function_name: Optional[str] = None) -> List:
         """在标记后的指定范围内查找表格（优化版 - 分级查找策略和绝对位置计算）
         
         策略（分级查找）：
@@ -1618,9 +1618,10 @@ class DocumentParser:
             estimated_pos = int((table_idx / total_tables) * doc_length)
             return estimated_pos
         
-        # 策略1：首选 - 标记后最近的未使用表格
+        # 策略1：首选 - 标记后最近的未使用表格（优先在章节范围内）
         parser_logger.debug(f"策略1: 查找标记后最近的未使用{table_type}要素表")
         candidate_tables_level1 = []  # (table_idx, parsed_elements, estimated_pos, header_summary)
+        candidate_tables_level1_in_range = []  # 在章节范围内的表格
         
         for table_idx, table in enumerate(self.tables):
             # 跳过已使用的表格
@@ -1634,14 +1635,25 @@ class DocumentParser:
             # 估算表格位置
             table_estimated_pos = estimate_table_position(table_idx)
             
-            # 只考虑标记后的表格（文档末尾允许更大的容差）
+            # 检查表格是否在章节范围内（优先使用章节范围判断）
+            # 对于非文档末尾的情况，如果表格在章节范围内，即使估算位置在标记前也接受（因为估算可能不准确）
             if is_document_end:
                 # 文档末尾：允许表格位置在标记前10%范围内（因为估算不准确）
                 if table_estimated_pos < marker_abs_pos - doc_length * 0.1:
                     continue
+                is_in_range = marker_abs_pos <= table_estimated_pos <= end_index
             else:
-                # 非文档末尾：严格要求表格在标记后
-                if table_estimated_pos < marker_abs_pos:
+                # 非文档末尾：优先使用章节范围判断
+                # 如果表格在章节范围内（table_estimated_pos <= end_index），即使估算位置在标记前也接受
+                # 但需要确保表格在功能章节内（从功能开始位置到章节结束位置）
+                # 这里我们使用更宽松的判断：只要表格在章节结束位置之前，就认为在范围内
+                # 因为估算位置可能不准确，表格实际位置可能在标记附近
+                is_in_range = table_estimated_pos <= end_index
+                # 但如果估算位置明显在标记前太多（超过功能章节开始位置），则排除（可能是前面的功能）
+                # 使用功能章节开始位置作为参考（如果有的话），否则使用标记位置
+                # 这里我们放宽限制，只要表格在章节结束位置之前就接受
+                # 但如果估算位置明显在标记前太多（超过50%文档长度），则排除
+                if table_estimated_pos < marker_abs_pos - doc_length * 0.5:
                     continue
             
             header_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
@@ -1667,21 +1679,61 @@ class DocumentParser:
             if is_input and self._is_input_table(header_text, table):
                 parsed = self._parse_input_table(table)
                 if parsed:
-                    candidate_tables_level1.append((table_idx, parsed, table_estimated_pos, header_summary))
-                    parser_logger.debug(
-                        f"找到候选输入表（策略1）: 索引 {table_idx}, 估算位置 {table_estimated_pos}, "
-                        f"要素数量 {len(parsed)}, 表头: {header_summary}"
-                    )
+                    candidate = (table_idx, parsed, table_estimated_pos, header_summary)
+                    if is_in_range:
+                        candidate_tables_level1_in_range.append(candidate)
+                        parser_logger.debug(
+                            f"找到候选输入表（策略1，章节内）: 索引 {table_idx}, 估算位置 {table_estimated_pos}, "
+                            f"要素数量 {len(parsed)}, 表头: {header_summary}"
+                        )
+                    else:
+                        candidate_tables_level1.append(candidate)
+                        parser_logger.debug(
+                            f"找到候选输入表（策略1，章节外）: 索引 {table_idx}, 估算位置 {table_estimated_pos}, "
+                            f"要素数量 {len(parsed)}, 表头: {header_summary}"
+                        )
             elif not is_input and self._is_output_table(header_text, table):
                 parsed = self._parse_output_table(table)
                 if parsed:
-                    candidate_tables_level1.append((table_idx, parsed, table_estimated_pos, header_summary))
-                    parser_logger.debug(
-                        f"找到候选输出表（策略1）: 索引 {table_idx}, 估算位置 {table_estimated_pos}, "
-                        f"要素数量 {len(parsed)}, 表头: {header_summary}"
-                    )
+                    candidate = (table_idx, parsed, table_estimated_pos, header_summary)
+                    if is_in_range:
+                        candidate_tables_level1_in_range.append(candidate)
+                        parser_logger.debug(
+                            f"找到候选输出表（策略1，章节内）: 索引 {table_idx}, 估算位置 {table_estimated_pos}, "
+                            f"要素数量 {len(parsed)}, 表头: {header_summary}"
+                        )
+                    else:
+                        candidate_tables_level1.append(candidate)
+                        parser_logger.debug(
+                            f"找到候选输出表（策略1，章节外）: 索引 {table_idx}, 估算位置 {table_estimated_pos}, "
+                            f"要素数量 {len(parsed)}, 表头: {header_summary}"
+                        )
         
-        # 如果有策略1的候选表格，选择最近的（估算位置最接近标记的）
+        # 优先选择在章节范围内的表格
+        if candidate_tables_level1_in_range:
+            # 优先选择在标记后的表格，如果都在标记前，则选择最接近标记的
+            # 将表格分为两类：标记后的和标记前的
+            tables_after_marker = [c for c in candidate_tables_level1_in_range if c[2] >= marker_abs_pos]
+            tables_before_marker = [c for c in candidate_tables_level1_in_range if c[2] < marker_abs_pos]
+            
+            if tables_after_marker:
+                # 优先选择标记后的表格，按距离标记位置排序
+                tables_after_marker.sort(key=lambda x: x[2] - marker_abs_pos)  # 按距离标记的距离排序
+                table_idx, parsed, estimated_pos, header_summary = tables_after_marker[0]
+            else:
+                # 如果都在标记前，选择最接近标记的
+                tables_before_marker.sort(key=lambda x: marker_abs_pos - x[2])  # 按距离标记的距离排序
+                table_idx, parsed, estimated_pos, header_summary = tables_before_marker[0]
+            
+            elements = parsed
+            self.used_tables.add(table_idx)
+            parser_logger.info(
+                f"策略1成功（章节范围内） - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
+                f"要素数量 {len(parsed)}, 表头: {header_summary}"
+            )
+            return elements
+        
+        # 如果章节范围内没有，再选择章节范围外的
         if candidate_tables_level1:
             # 按估算位置排序，选择最接近标记的表格
             candidate_tables_level1.sort(key=lambda x: abs(x[2] - marker_abs_pos))
@@ -1689,14 +1741,16 @@ class DocumentParser:
             elements = parsed
             self.used_tables.add(table_idx)
             parser_logger.info(
-                f"策略1成功 - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
+                f"策略1成功（章节范围外） - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
                 f"要素数量 {len(parsed)}, 表头: {header_summary}"
             )
             return elements
         
         # 策略2：次选 - 标记后最近的所有表格（忽略已使用标记）
+        # 优先选择在章节范围内的表格
         parser_logger.debug(f"策略1失败，尝试策略2: 查找标记后最近的所有{table_type}要素表（忽略已使用标记）")
         candidate_tables_level2 = []
+        candidate_tables_level2_in_range = []  # 在章节范围内的表格
         
         for table_idx, table in enumerate(self.tables):
             # 跳过行数不足的表格
@@ -1713,6 +1767,9 @@ class DocumentParser:
             else:
                 if table_estimated_pos < marker_abs_pos:
                     continue
+            
+            # 检查表格是否在章节范围内
+            is_in_range = marker_abs_pos <= table_estimated_pos <= end_index
             
             header_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
             header_summary = header_text[:50]
@@ -1735,27 +1792,50 @@ class DocumentParser:
             if is_input and self._is_input_table(header_text, table):
                 parsed = self._parse_input_table(table)
                 if parsed:
-                    candidate_tables_level2.append((table_idx, parsed, table_estimated_pos, header_summary))
+                    candidate = (table_idx, parsed, table_estimated_pos, header_summary)
+                    if is_in_range:
+                        candidate_tables_level2_in_range.append(candidate)
+                    else:
+                        candidate_tables_level2.append(candidate)
             elif not is_input and self._is_output_table(header_text, table):
                 parsed = self._parse_output_table(table)
                 if parsed:
-                    candidate_tables_level2.append((table_idx, parsed, table_estimated_pos, header_summary))
+                    candidate = (table_idx, parsed, table_estimated_pos, header_summary)
+                    if is_in_range:
+                        candidate_tables_level2_in_range.append(candidate)
+                    else:
+                        candidate_tables_level2.append(candidate)
         
-        # 如果有策略2的候选表格，选择最近的
+        # 优先选择在章节范围内的表格
+        if candidate_tables_level2_in_range:
+            candidate_tables_level2_in_range.sort(key=lambda x: abs(x[2] - marker_abs_pos))
+            table_idx, parsed, estimated_pos, header_summary = candidate_tables_level2_in_range[0]
+            elements = parsed
+            self.used_tables.add(table_idx)
+            parser_logger.info(
+                f"策略2成功（章节范围内） - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
+                f"要素数量 {len(parsed)}, 表头: {header_summary}"
+            )
+            return elements
+        
+        # 如果章节范围内没有，再选择章节范围外的
         if candidate_tables_level2:
             candidate_tables_level2.sort(key=lambda x: abs(x[2] - marker_abs_pos))
             table_idx, parsed, estimated_pos, header_summary = candidate_tables_level2[0]
             elements = parsed
-            # 注意：策略2不标记为已使用，因为可能被其他步骤使用
+            # 标记为已使用，避免其他功能找到同一个表格
+            self.used_tables.add(table_idx)
             parser_logger.info(
-                f"策略2成功 - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
+                f"策略2成功（章节范围外） - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
                 f"要素数量 {len(parsed)}, 表头: {header_summary}"
             )
             return elements
         
         # 策略3：最后 - 按内容语义匹配的表格（在整个文档中查找）
+        # 优先选择在章节范围内的表格
         parser_logger.debug(f"策略2失败，尝试策略3: 按内容语义匹配查找{table_type}要素表")
         candidate_tables_level3 = []
+        candidate_tables_level3_in_range = []  # 在章节范围内的表格
         
         for table_idx, table in enumerate(self.tables):
             # 跳过行数不足的表格
@@ -1779,26 +1859,49 @@ class DocumentParser:
             if is_file_format:
                 continue
             
+            # 估算表格位置
+            table_estimated_pos = estimate_table_position(table_idx)
+            # 检查表格是否在章节范围内
+            is_in_range = marker_abs_pos <= table_estimated_pos <= end_index
+            
             # 表格类型判断
             if is_input and self._is_input_table(header_text, table):
                 parsed = self._parse_input_table(table)
                 if parsed:
-                    table_estimated_pos = estimate_table_position(table_idx)
-                    candidate_tables_level3.append((table_idx, parsed, table_estimated_pos, header_summary))
+                    candidate = (table_idx, parsed, table_estimated_pos, header_summary)
+                    if is_in_range:
+                        candidate_tables_level3_in_range.append(candidate)
+                    else:
+                        candidate_tables_level3.append(candidate)
             elif not is_input and self._is_output_table(header_text, table):
                 parsed = self._parse_output_table(table)
                 if parsed:
-                    table_estimated_pos = estimate_table_position(table_idx)
-                    candidate_tables_level3.append((table_idx, parsed, table_estimated_pos, header_summary))
+                    candidate = (table_idx, parsed, table_estimated_pos, header_summary)
+                    if is_in_range:
+                        candidate_tables_level3_in_range.append(candidate)
+                    else:
+                        candidate_tables_level3.append(candidate)
         
-        # 如果有策略3的候选表格，选择最接近标记的
+        # 优先选择在章节范围内的表格
+        if candidate_tables_level3_in_range:
+            candidate_tables_level3_in_range.sort(key=lambda x: abs(x[2] - marker_abs_pos))
+            table_idx, parsed, estimated_pos, header_summary = candidate_tables_level3_in_range[0]
+            elements = parsed
+            self.used_tables.add(table_idx)
+            parser_logger.info(
+                f"策略3成功（章节范围内） - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
+                f"要素数量 {len(parsed)}, 表头: {header_summary}"
+            )
+            return elements
+        
+        # 如果章节范围内没有，再选择章节范围外的
         if candidate_tables_level3:
             candidate_tables_level3.sort(key=lambda x: abs(x[2] - marker_abs_pos))
             table_idx, parsed, estimated_pos, header_summary = candidate_tables_level3[0]
             elements = parsed
-            # 策略3也不标记为已使用
+            self.used_tables.add(table_idx)
             parser_logger.info(
-                f"策略3成功 - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
+                f"策略3成功（章节范围外） - 找到{table_type}要素表: 索引 {table_idx}, 估算位置 {estimated_pos}, "
                 f"要素数量 {len(parsed)}, 表头: {header_summary}"
             )
             return elements
@@ -2317,15 +2420,33 @@ class DocumentParser:
                             found_output_marker = True
                             output_marker_index = i
                             # 检查后续段落（最多5行）是否包含"不涉及"
+                            # 但需要确保"不涉及"紧跟在输出要素标记后，而不是在其他章节中
                             for j in range(i + 1, min(i + 6, search_end)):
                                 next_text = self.paragraphs[j].text.strip()
                                 if not next_text:
                                     continue
-                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                # 如果遇到章节标题（如"三、操作步骤说明："），停止检查
+                                # 因为"不涉及"可能属于其他章节，而不是输出要素
+                                if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
+                                    # 这是章节标题，停止检查
                                     break
-                                if "不涉及" in next_text:
-                                    output_not_involved = True
+                                # 如果遇到其他输入输出相关的标记，也停止检查
+                                if any(m in next_text for m in input_markers + output_markers):
                                     break
+                                # 检查"不涉及"：如果后续有章节标题，则"不涉及"不属于输出要素
+                                if "不涉及" in next_text and j <= i + 3:
+                                    # 检查后续是否有章节标题（最多检查2行）
+                                    is_in_section = False
+                                    for k in range(j + 1, min(j + 3, search_end)):
+                                        follow_text = self.paragraphs[k].text.strip()
+                                        if re.match(r'^[一二三四五六七八九十]+[、.]', follow_text) and len(follow_text) > 5:
+                                            # "不涉及"后面有章节标题，说明"不涉及"属于该章节，不属于输出要素
+                                            is_in_section = True
+                                            break
+                                    if not is_in_section:
+                                        # "不涉及"后面没有章节标题，说明它属于输出要素
+                                        output_not_involved = True
+                                        break
                             break
                 
                 if found_input_marker and found_output_marker:
@@ -2359,35 +2480,73 @@ class DocumentParser:
                             found_output_marker = True
                             output_marker_index = i
                             # 检查后续段落是否包含"不涉及"
+                            # 但需要确保"不涉及"紧跟在输出要素标记后，而不是在其他章节中
                             for j in range(i + 1, min(i + 4, search_end)):
                                 next_text = self.paragraphs[j].text.strip()
-                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                if not next_text:
+                                    continue
+                                # 如果遇到章节标题（如"三、操作步骤说明："），停止检查
+                                if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
+                                    # 这是章节标题，停止检查
                                     break
-                                if "不涉及" in next_text:
-                                    output_not_involved = True
+                                # 如果遇到其他输入输出相关的标记，也停止检查
+                                if any(m in next_text for m in input_markers + output_markers):
                                     break
+                                # 检查"不涉及"：如果后续有章节标题，则"不涉及"不属于输出要素
+                                if "不涉及" in next_text and j <= i + 3:
+                                    # 检查后续是否有章节标题（最多检查2行）
+                                    is_in_section = False
+                                    for k in range(j + 1, min(j + 3, search_end)):
+                                        follow_text = self.paragraphs[k].text.strip()
+                                        if re.match(r'^[一二三四五六七八九十]+[、.]', follow_text) and len(follow_text) > 5:
+                                            # "不涉及"后面有章节标题，说明"不涉及"属于该章节，不属于输出要素
+                                            is_in_section = True
+                                            break
+                                    if not is_in_section:
+                                        # "不涉及"后面没有章节标题，说明它属于输出要素
+                                        output_not_involved = True
+                                        break
                             break
                 
                 if found_input_marker and found_output_marker:
                     break
         
-        # 智能表格定位：按顺序查找未使用的表格
+        # 智能表格定位：在功能章节范围内查找表格
         if found_input_marker and not input_not_involved:
-            input_elements = self._search_all_unused_tables(is_input=True)
-            if not input_elements and input_marker_index >= 0:
-                input_elements = self._find_nearest_table_after_marker(
-                    input_marker_index, is_input=True
+            # 优先在功能章节范围内查找标记后最近的输入要素表
+            if input_marker_index >= 0:
+                # 使用功能章节范围（从输入要素标记到章节结束）查找表格
+                input_elements = self._find_table_after_marker_in_range(
+                    input_marker_index, end_index, is_input=True, is_document_end=False, function_name=function_name
                 )
+            # 如果没找到，再查找所有未使用的表格（作为回退策略）
+            if not input_elements:
+                input_elements = self._search_all_unused_tables(is_input=True)
         elif input_not_involved:
             input_elements = []
         
         if found_output_marker and not output_not_involved:
-            # 优先查找标记后最近的输出要素表
+            # 优先在"输入输出说明"章节范围内查找标记后最近的输出要素表
             if output_marker_index >= 0:
-                output_elements = self._find_nearest_table_after_marker(
-                    output_marker_index, is_input=False
+                # 查找"输入输出说明"章节的结束位置（通常是"操作步骤说明"或下一个子章节）
+                io_section_end = end_index  # 默认使用功能章节结束位置
+                if found_input_output_section:
+                    # 在"输入输出说明"章节后查找下一个子章节标题
+                    for i in range(search_start_io + 1, min(search_start_io + 50, search_end)):
+                        para = self.paragraphs[i]
+                        text = para.text.strip()
+                        # 查找下一个子章节标题（如"操作步骤说明"、"三、"等）
+                        if (re.match(r'^[一二三四五六七八九十]+[、.]', text) and len(text) > 5) or \
+                           ("操作步骤说明" in text) or \
+                           (self._is_heading(para, level=3) and i > search_start_io + 10):
+                            io_section_end = i
+                            break
+                
+                # 使用"输入输出说明"章节范围（从输出要素标记到该章节结束）查找表格
+                output_elements = self._find_table_after_marker_in_range(
+                    output_marker_index, io_section_end, is_input=False, is_document_end=False, function_name=function_name
                 )
-            # 如果没找到，再查找所有未使用的表格
+            # 如果没找到，再查找所有未使用的表格（作为回退策略）
             if not output_elements:
                 output_elements = self._search_all_unused_tables(is_input=False)
         elif output_not_involved:
@@ -2551,19 +2710,33 @@ class DocumentParser:
                             found_output_marker = True
                             output_marker_index = i
                             # 检查后续段落（最多5行）是否包含"不涉及"
-                            # 需要跳过空行，直到找到下一个标记或"不涉及"
+                            # 但需要确保"不涉及"紧跟在输出要素标记后，而不是在其他章节中
                             for j in range(i + 1, min(i + 6, search_end)):
                                 next_text = self.paragraphs[j].text.strip()
                                 # 跳过空行
                                 if not next_text:
                                     continue
-                                # 如果遇到下一个章节标记（如"三、"），停止检查
-                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                # 如果遇到章节标题（如"三、操作步骤说明："），停止检查
+                                if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
+                                    # 这是章节标题，停止检查
                                     break
-                                # 检查是否包含"不涉及"
-                                if "不涉及" in next_text:
-                                    output_not_involved = True
+                                # 如果遇到其他输入输出相关的标记，也停止检查
+                                if any(m in next_text for m in input_markers + output_markers):
                                     break
+                                # 检查"不涉及"：如果后续有章节标题，则"不涉及"不属于输出要素
+                                if "不涉及" in next_text and j <= i + 3:
+                                    # 检查后续是否有章节标题（最多检查2行）
+                                    is_in_section = False
+                                    for k in range(j + 1, min(j + 3, search_end)):
+                                        follow_text = self.paragraphs[k].text.strip()
+                                        if re.match(r'^[一二三四五六七八九十]+[、.]', follow_text) and len(follow_text) > 5:
+                                            # "不涉及"后面有章节标题，说明"不涉及"属于该章节，不属于输出要素
+                                            is_in_section = True
+                                            break
+                                    if not is_in_section:
+                                        # "不涉及"后面没有章节标题，说明它属于输出要素
+                                        output_not_involved = True
+                                        break
                             break
                 
                 if found_input_marker and found_output_marker:
@@ -2597,13 +2770,32 @@ class DocumentParser:
                             found_output_marker = True
                             output_marker_index = i
                             # 检查后续段落是否包含"不涉及"
+                            # 但需要确保"不涉及"紧跟在输出要素标记后，而不是在其他章节中
                             for j in range(i + 1, min(i + 4, search_end)):
                                 next_text = self.paragraphs[j].text.strip()
-                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
+                                if not next_text:
+                                    continue
+                                # 如果遇到章节标题（如"三、操作步骤说明："），停止检查
+                                if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
+                                    # 这是章节标题，停止检查
                                     break
-                                if "不涉及" in next_text:
-                                    output_not_involved = True
+                                # 如果遇到其他输入输出相关的标记，也停止检查
+                                if any(m in next_text for m in input_markers + output_markers):
                                     break
+                                # 检查"不涉及"：如果后续有章节标题，则"不涉及"不属于输出要素
+                                if "不涉及" in next_text and j <= i + 3:
+                                    # 检查后续是否有章节标题（最多检查2行）
+                                    is_in_section = False
+                                    for k in range(j + 1, min(j + 3, search_end)):
+                                        follow_text = self.paragraphs[k].text.strip()
+                                        if re.match(r'^[一二三四五六七八九十]+[、.]', follow_text) and len(follow_text) > 5:
+                                            # "不涉及"后面有章节标题，说明"不涉及"属于该章节，不属于输出要素
+                                            is_in_section = True
+                                            break
+                                    if not is_in_section:
+                                        # "不涉及"后面没有章节标题，说明它属于输出要素
+                                        output_not_involved = True
+                                        break
                             break
                 
                 if found_input_marker and found_output_marker:
