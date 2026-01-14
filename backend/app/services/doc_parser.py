@@ -2208,9 +2208,18 @@ class DocumentParser:
         """提取功能清单（仅功能名称列表）"""
         functions = []
         
-        # 查找"5.1 功能清单"章节
+        # 查找"5 功能*（A阶段）"章节，忽略之前的内容（非建模需求）
+        function_chapter_start = -1
         for i, para in enumerate(self.paragraphs):
             text = para.text.strip()
+            if "功能" in text and "（A阶段）" in text and re.match(r'^5\s+功能', text):
+                function_chapter_start = i
+                break
+        
+        # 查找"5.1 功能清单"章节（在功能章节之后）
+        search_start = function_chapter_start if function_chapter_start >= 0 else 0
+        for i in range(search_start, len(self.paragraphs)):
+            text = self.paragraphs[i].text.strip()
             
             # 查找"5 功能*（A阶段）"或"5.1 功能清单"
             if ("功能" in text and "（A阶段）" in text) or "功能清单" in text:
@@ -2271,11 +2280,16 @@ class DocumentParser:
                 function_number = match.group(1)  # 如 5.2.1
                 function_title = match.group(2).strip()  # 如 查询账单明细功能 或 查询账单明细（催收）功能
                 
+                # 清理功能标题：移除页码（如末尾的数字）和多余的制表符/空格
+                # 页码通常在末尾，格式如 "功能名称\t23" 或 "功能名称 23"
+                function_title = re.sub(r'[\s\t]+\d+$', '', function_title)  # 移除末尾的制表符/空格+数字
+                function_title = re.sub(r'\t+', ' ', function_title)  # 将制表符替换为空格
+                function_title = function_title.strip()
+                
                 # 验证提取的内容是否像功能名称（包含"功能"或包含"查询"、"账单"等关键词）
-                if "功能" in function_title or any(kw in function_title for kw in ["查询", "账单", "明细", "管理", "处理"]):
-                    # 如果标题以"功能"结尾，直接使用；否则添加"功能"后缀
-                    if not function_title.endswith("功能") and "功能" not in function_title:
-                        function_title += "功能"
+                if "功能" in function_title or any(kw in function_title for kw in ["查询", "账单", "明细", "管理", "处理", "期供"]):
+                    # 不自动添加"功能"后缀，直接使用标题中的名称
+                    # 例如："5.2.1 查询贷款期供明细功能\t23" -> "查询贷款期供明细功能"
                     
                     function_titles.append((function_title, i))
                     parser_logger.info(f"从功能说明部分提取功能标题: {function_title}, 索引: {i}, 原始文本: {repr(text[:50])}")
@@ -2292,10 +2306,20 @@ class DocumentParser:
         """
         functions = []
         
-        # 1. 查找"功能说明"部分起始位置
-        function_section_start = -1
+        # 1. 查找"5 功能*（A阶段）"章节，忽略之前的内容（非建模需求）
+        function_chapter_start = -1
         for i, para in enumerate(self.paragraphs):
             text = para.text.strip()
+            if "功能" in text and "（A阶段）" in text and re.match(r'^5\s+功能', text):
+                function_chapter_start = i
+                parser_logger.debug(f"找到功能章节，索引: {i}, 文本: {repr(text[:100])}")
+                break
+        
+        # 2. 查找"功能说明"部分起始位置（在功能章节之后）
+        function_section_start = -1
+        search_start = function_chapter_start if function_chapter_start >= 0 else 0
+        for i in range(search_start, len(self.paragraphs)):
+            text = self.paragraphs[i].text.strip()
             if "功能说明" in text and ("5.2" in text or "（A阶段）" in text):
                 function_section_start = i
                 break
@@ -2495,22 +2519,21 @@ class DocumentParser:
                                 found_input_marker = True
                                 input_marker_index = i
                                 parser_logger.debug(f"找到输入要素标记，索引: {i}, 文本: {repr(text)}")
-                                # 检查后续段落（最多3行）是否包含"不涉及"（仅在输入输出要素子章节内）
-                                for j in range(i + 1, min(i + 4, search_end)):
-                                    next_text = self.paragraphs[j].text.strip()
-                                    if not next_text:
-                                        continue
-                                    # 如果遇到输出要素标记，停止检查
-                                    if any(m in next_text for m in output_markers):
-                                        break
-                                    # 如果遇到新的章节标题（如"三、操作步骤说明"），停止检查
-                                    if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
-                                        break
-                                    # 检查"不涉及"：仅在输入输出要素子章节内检查
-                                    if "不涉及" in next_text and j <= i + 2:
-                                        input_not_involved = True
-                                        parser_logger.debug(f"输入要素标记为不涉及，索引: {j}")
-                                        break
+                                # 检查"不涉及"：只有"不涉及"直接跟在标记后面（同一段落内），才是不涉及
+                                # 例如："输入要素：不涉及" 或 "输入要素： 不涉及"（同一段落）
+                                # 如果"输入要素："后面换行了，然后下一行是"不涉及"，那应该不是不涉及
+                                
+                                # 检查当前段落是否包含"不涉及"（在同一段落内）
+                                if "不涉及" in text:
+                                    # 检查"不涉及"是否直接跟在"输入要素："后面
+                                    marker_pos = text.find("输入要素")
+                                    not_involved_pos = text.find("不涉及")
+                                    if marker_pos >= 0 and not_involved_pos > marker_pos:
+                                        # 如果中间只有冒号、空格、制表符，认为是直接跟在后面
+                                        if re.match(r'^输入要素[：:]\s*不涉及', text[marker_pos:]):
+                                            input_not_involved = True
+                                            parser_logger.debug(f"输入要素标记在同一段落内直接跟着'不涉及'，索引: {i}, 文本: {repr(text[:100])}")
+                                # 如果不在同一段落内，不检查下一段落（因为换行后的"不涉及"更可能是其他章节的）
                                 break
                 
                     # 查找"输出要素"标记（在输入输出要素子章节内）
@@ -2522,19 +2545,21 @@ class DocumentParser:
                                 found_output_marker = True
                                 output_marker_index = i
                                 parser_logger.debug(f"找到输出要素标记，索引: {i}, 文本: {repr(text)}")
-                                # 检查后续段落（最多3行）是否包含"不涉及"（仅在输入输出要素子章节内）
-                                for j in range(i + 1, min(i + 4, search_end)):
-                                    next_text = self.paragraphs[j].text.strip()
-                                    if not next_text:
-                                        continue
-                                    # 如果遇到新的章节标题（如"三、操作步骤说明"），停止检查
-                                    if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
-                                        break
-                                    # 检查"不涉及"：仅在输入输出要素子章节内检查
-                                    if "不涉及" in next_text and j <= i + 2:
-                                        output_not_involved = True
-                                        parser_logger.debug(f"输出要素标记为不涉及，索引: {j}")
-                                        break
+                                # 检查"不涉及"：只有"不涉及"直接跟在标记后面（同一段落内），才是不涉及
+                                # 例如："输出要素：不涉及" 或 "输出要素： 不涉及"（同一段落）
+                                # 如果"输出要素："后面换行了，然后下一行是"不涉及"，那应该不是不涉及
+                                
+                                # 检查当前段落是否包含"不涉及"（在同一段落内）
+                                if "不涉及" in text:
+                                    # 检查"不涉及"是否直接跟在"输出要素："后面
+                                    marker_pos = text.find("输出要素")
+                                    not_involved_pos = text.find("不涉及")
+                                    if marker_pos >= 0 and not_involved_pos > marker_pos:
+                                        # 如果中间只有冒号、空格、制表符，认为是直接跟在后面
+                                        if re.match(r'^输出要素[：:]\s*不涉及', text[marker_pos:]):
+                                            output_not_involved = True
+                                            parser_logger.debug(f"输出要素标记在同一段落内直接跟着'不涉及'，索引: {i}, 文本: {repr(text[:100])}")
+                                # 如果不在同一段落内，不检查下一段落（因为换行后的"不涉及"更可能是其他章节的）
                                 break
                     
                     if found_input_marker and found_output_marker:
