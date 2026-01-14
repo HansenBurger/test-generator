@@ -44,3 +44,5 @@ log/
 # 调试和测试脚本
 backend/debug_*.py
 backend/test_*.py
+test_*.py
+test_*.txt
