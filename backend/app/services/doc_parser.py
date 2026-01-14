@@ -2238,17 +2238,61 @@ class DocumentParser:
         
         return functions
     
+    def _extract_function_titles_from_section(self, function_section_start: int) -> List[tuple]:
+        """从功能说明部分提取功能标题（如 5.2.1、5.2.2 等）
+        
+        Returns:
+            List[tuple]: [(function_name, index), ...] 功能名称和段落索引的列表
+        """
+        function_titles = []
+        # 从功能说明部分开始搜索，不要跳过（因为功能标题可能在功能说明部分之后立即出现）
+        # 但跳过前100个段落是为了跳过目录，如果功能说明部分在前100个段落之后，则从功能说明部分开始
+        search_start = function_section_start + 1  # 从功能说明部分的下一个段落开始
+        search_end = len(self.paragraphs)
+        
+        # 限制搜索范围：在功能说明部分后的200个段落内查找功能标题
+        # 这样可以避免搜索到其他章节的功能
+        search_end = min(search_start + 200, search_end)
+        
+        parser_logger.debug(f"在功能说明部分提取功能标题，搜索范围: {search_start} 到 {search_end}")
+        
+        for i in range(search_start, search_end):
+            para = self.paragraphs[i]
+            text = para.text.strip()
+            
+            if not text:
+                continue
+            
+            # 匹配功能标题格式：5.2.1、5.2.2 等，后面跟着功能名称
+            # 格式：5.2.1 查询账单明细功能 或 5.2.2 查询账单明细（催收）功能
+            # 使用更宽松的匹配：允许数字编号后跟任意空白字符，然后提取后面的内容
+            match = re.match(r'^(\d+\.\d+\.\d+)[\s\t]+(.+)', text)
+            if match:
+                function_number = match.group(1)  # 如 5.2.1
+                function_title = match.group(2).strip()  # 如 查询账单明细功能 或 查询账单明细（催收）功能
+                
+                # 验证提取的内容是否像功能名称（包含"功能"或包含"查询"、"账单"等关键词）
+                if "功能" in function_title or any(kw in function_title for kw in ["查询", "账单", "明细", "管理", "处理"]):
+                    # 如果标题以"功能"结尾，直接使用；否则添加"功能"后缀
+                    if not function_title.endswith("功能") and "功能" not in function_title:
+                        function_title += "功能"
+                    
+                    function_titles.append((function_title, i))
+                    parser_logger.info(f"从功能说明部分提取功能标题: {function_title}, 索引: {i}, 原始文本: {repr(text[:50])}")
+        
+        return function_titles
+    
     def _extract_functions(self) -> List[FunctionInfo]:
-        """提取功能列表（包含输入输出要素）"""
+        """提取功能列表（包含输入输出要素）
+        
+        优先级：
+        1. 优先从功能说明部分提取功能标题（如 5.2.1、5.2.2 等）
+        2. 如果功能清单表存在，用它作为辅助验证
+        3. 如果两者不一致，优先使用功能说明中的功能标题
+        """
         functions = []
         
-        # 1. 先提取功能名称列表
-        function_names = self._extract_function_list()
-        
-        if not function_names:
-            return functions
-        
-        # 2. 性能优化：一次性查找"功能说明"部分起始位置
+        # 1. 查找"功能说明"部分起始位置
         function_section_start = -1
         for i, para in enumerate(self.paragraphs):
             text = para.text.strip()
@@ -2256,68 +2300,92 @@ class DocumentParser:
                 function_section_start = i
                 break
         
-        # 3. 性能优化：一次性建立功能名称到段落索引的映射
-        function_name_to_index = {}
-        search_start = max(function_section_start if function_section_start >= 0 else 0, 100)
-        search_end = len(self.paragraphs)
+        # 2. 优先从功能说明部分提取功能标题
+        function_titles_from_section = []
+        if function_section_start >= 0:
+            function_titles_from_section = self._extract_function_titles_from_section(function_section_start)
         
-        # 为每个功能名称建立索引映射（使用与原方法相同的逻辑）
-        for function_name in function_names:
-            cleaned_function = re.sub(r"[^\w\u4e00-\u9fa5]", "", function_name)
-            found = False
+        # 3. 从功能清单表提取功能名称（作为辅助）
+        function_names_from_table = self._extract_function_list()
+        
+        # 4. 确定最终使用的功能名称列表
+        # 如果功能说明部分有功能标题，优先使用；否则使用功能清单表
+        parser_logger.info(f"功能说明部分提取到 {len(function_titles_from_section)} 个功能标题")
+        parser_logger.info(f"功能清单表提取到 {len(function_names_from_table)} 个功能名称")
+        
+        if function_titles_from_section:
+            # 使用功能说明部分的功能标题
+            function_names = [title for title, _ in function_titles_from_section]
+            function_name_to_index = {title: idx for title, idx in function_titles_from_section}
+            parser_logger.info(f"✓ 优先使用功能说明部分的功能标题: {function_names}")
+        elif function_names_from_table:
+            # 回退到功能清单表
+            function_names = function_names_from_table
+            function_name_to_index = {}
+            parser_logger.info(f"✓ 使用功能清单表的功能名称: {function_names}")
+        else:
+            # 都没有找到
+            parser_logger.warning("未找到功能列表：功能说明部分和功能清单表都为空")
+            return functions
+        
+        # 5. 如果功能清单表存在但功能说明部分也有功能标题，验证一致性
+        if function_titles_from_section and function_names_from_table:
+            if len(function_titles_from_section) != len(function_names_from_table):
+                parser_logger.warning(
+                    f"功能说明部分的功能数量({len(function_titles_from_section)})与功能清单表的功能数量"
+                    f"({len(function_names_from_table)})不一致，优先使用功能说明部分的功能标题"
+                )
+        
+        # 6. 如果使用功能清单表的功能名称，需要建立索引映射
+        if not function_name_to_index:
+            search_start = max(function_section_start if function_section_start >= 0 else 0, 100)
+            search_end = len(self.paragraphs)
             
-            # 优先查找：在功能说明部分内精确匹配功能名称的段落
-            if function_section_start >= 0:
-                # 在功能说明部分内查找（跳过目录部分，通常目录在前100个段落）
-                for i in range(max(function_section_start, 100), search_end):
-                    para = self.paragraphs[i]
-                    text = para.text.strip()
-                    
-                    # 精确匹配：段落文本就是功能名称（可能带编号）
-                    if function_name == text or (function_name in text and len(text) <= len(function_name) + 10):
-                        # 排除目录和编号行
-                        if "目录" not in text and not re.match(r'^\d+\.\d+', text):
-                            function_name_to_index[function_name] = i
-                            found = True
-                            break
-            
-            # 如果没找到精确匹配，使用模糊匹配（优先在功能说明部分内）
-            if not found:
+            for function_name in function_names:
+                cleaned_function = re.sub(r"[^\w\u4e00-\u9fa5]", "", function_name)
+                found = False
+                
+                # 优先查找：在功能说明部分内精确匹配功能名称的段落
                 if function_section_start >= 0:
-                    # 先在功能说明部分内查找
                     for i in range(max(function_section_start, 100), search_end):
                         para = self.paragraphs[i]
                         text = para.text.strip()
                         
-                        # 检查是否匹配功能名称（可能是标题或普通段落）
-                        cleaned_text = re.sub(r"[^\w\u4e00-\u9fa5]", "", text)
-                        
-                        # 匹配逻辑：功能名称完全匹配，或者功能名称包含在文本中
-                        if (cleaned_function in cleaned_text or cleaned_text in cleaned_function) and len(cleaned_text) >= len(cleaned_function) * 0.7:
-                            # 确保不是在目录或其他不相关的地方
-                            if ("功能" in text or function_name in text) and "目录" not in text:
-                                # 排除目录行（通常包含页码）
-                                if not re.match(r'^\d+\.\d+', text) or len(text) > 50:
-                                    function_name_to_index[function_name] = i
-                                    found = True
-                                    break
+                        # 精确匹配：段落文本就是功能名称（可能带编号）
+                        if function_name == text or (function_name in text and len(text) <= len(function_name) + 10):
+                            if "目录" not in text and not re.match(r'^\d+\.\d+', text):
+                                function_name_to_index[function_name] = i
+                                found = True
+                                break
                 
-                # 如果还没找到，在整个文档中查找
+                # 如果没找到精确匹配，使用模糊匹配
                 if not found:
-                    for i in range(search_start, search_end):
-                        para = self.paragraphs[i]
-                        text = para.text.strip()
-                        
-                        cleaned_text = re.sub(r"[^\w\u4e00-\u9fa5]", "", text)
-                        
-                        if (cleaned_function in cleaned_text or cleaned_text in cleaned_function) and len(cleaned_text) >= len(cleaned_function) * 0.7:
-                            if ("功能" in text or function_name in text) and "目录" not in text:
-                                # 排除目录行
-                                if not re.match(r'^\d+\.\d+', text) or len(text) > 50:
-                                    function_name_to_index[function_name] = i
-                                    break
+                    if function_section_start >= 0:
+                        for i in range(max(function_section_start, 100), search_end):
+                            para = self.paragraphs[i]
+                            text = para.text.strip()
+                            cleaned_text = re.sub(r"[^\w\u4e00-\u9fa5]", "", text)
+                            
+                            if (cleaned_function in cleaned_text or cleaned_text in cleaned_function) and len(cleaned_text) >= len(cleaned_function) * 0.7:
+                                if ("功能" in text or function_name in text) and "目录" not in text:
+                                    if not re.match(r'^\d+\.\d+', text) or len(text) > 50:
+                                        function_name_to_index[function_name] = i
+                                        found = True
+                                        break
+                    
+                    if not found:
+                        for i in range(search_start, search_end):
+                            para = self.paragraphs[i]
+                            text = para.text.strip()
+                            cleaned_text = re.sub(r"[^\w\u4e00-\u9fa5]", "", text)
+                            
+                            if (cleaned_function in cleaned_text or cleaned_text in cleaned_function) and len(cleaned_text) >= len(cleaned_function) * 0.7:
+                                if ("功能" in text or function_name in text) and "目录" not in text:
+                                    if not re.match(r'^\d+\.\d+', text) or len(text) > 50:
+                                        function_name_to_index[function_name] = i
+                                        break
         
-        # 4. 为每个功能提取详细输入输出要素（使用缓存的索引，失败时回退到原方法）
+        # 7. 为每个功能提取详细输入输出要素（使用缓存的索引，失败时回退到原方法）
         for function_name in function_names:
             function_index = function_name_to_index.get(function_name, -1)
             
@@ -2347,20 +2415,30 @@ class DocumentParser:
         if function_section_index < 0:
             return input_elements, output_elements
         
-        # 在功能章节内查找输入输出要素
-        # 查找结束位置（下一个三级标题、二级标题或一级标题）
+        # 对于非建模需求，只在5.2功能说明部分内查找
+        # 查找功能说明部分的结束位置（下一个5.2.x功能或下一个二级标题如"6."）
         end_index = len(self.paragraphs)
         for i in range(function_section_index + 1, len(self.paragraphs)):
             para = self.paragraphs[i]
-            if (self._is_heading(para, level=3) or 
-                self._is_heading(para, level=2) or 
-                self._is_heading(para, level=1)):
-                end_index = i
-                break
+            text = para.text.strip()
+            # 查找下一个5.2.x功能（如"5.2.2"）
+            if re.match(r'^5\.2\.\d+', text) and i > function_section_index + 5:
+                # 可能是下一个功能，检查是否包含"功能"关键词
+                if "功能" in text:
+                    end_index = i
+                    parser_logger.debug(f"功能 '{function_name}' 搜索范围结束（下一个功能）: {i}, 文本: {repr(text)}")
+                    break
+            # 查找下一个二级标题（如"6."、"5.3"），表示功能说明部分结束
+            if (self._is_heading(para, level=2) or self._is_heading(para, level=1)):
+                if re.match(r'^[56]\.', text) or re.match(r'^[56]\.\d+', text):
+                    end_index = i
+                    parser_logger.debug(f"功能 '{function_name}' 搜索范围结束（下一个章节）: {i}, 文本: {repr(text)}")
+                    break
         
-        # 扩大搜索范围：从功能章节开始，向后搜索
-        search_start = max(0, function_section_index - 10)
-        search_end = min(len(self.paragraphs), function_section_index + 200)
+        # 搜索范围：从功能位置开始，到功能说明部分结束（或下一个功能）
+        search_start = function_section_index
+        search_end = end_index
+        parser_logger.debug(f"功能 '{function_name}' 搜索范围: {search_start} 到 {search_end}")
         
         # 在功能章节内查找"输入要素"和"输出要素"标记
         input_markers = ["输入要素", "输入要素：", "输入输出要素", "输入要素表"]
@@ -2375,82 +2453,92 @@ class DocumentParser:
         input_not_involved = False
         output_not_involved = False
         found_input_output_section = False
+        found_input_output_elements_section = False
         
-        # 先查找"输入输出说明"标记，确保我们在正确的章节内
+        # 步骤1：先查找"输入输出说明"标记，确保我们在正确的章节内
         for i in range(search_start, search_end):
             para = self.paragraphs[i]
             text = para.text.strip()
             
-            # 查找"输入输出说明"或"输入输出要素"
-            if "输入输出说明" in text or ("输入输出要素" in text and "：" in text):
+            # 查找"输入输出说明"（可能是 5.2.2.2 输入输出说明 这样的格式）
+            if "输入输出说明" in text:
                 found_input_output_section = True
                 search_start_io = i
+                parser_logger.debug(f"找到输入输出说明章节，索引: {i}, 文本: {repr(text)}")
                 break
         
-        # 如果找到了"输入输出说明"章节，在该章节内查找
+        # 步骤2：如果找到了"输入输出说明"章节，在该章节内查找"输入输出要素"子章节
         if found_input_output_section:
-            for i in range(search_start_io, min(search_start_io + 20, search_end)):
+            # 先查找"输入输出要素"子章节（如"三、输入输出要素："）
+            for i in range(search_start_io + 1, min(search_start_io + 50, search_end)):
                 para = self.paragraphs[i]
                 text = para.text.strip()
                 
-                # 查找"输入要素"标记
-                if not found_input_marker:
-                    for marker in input_markers:
-                        if marker in text and ("输入要素" in marker or marker == "输入要素："):
-                            found_input_marker = True
-                            input_marker_index = i
-                            # 检查后续段落（最多5行）是否包含"不涉及"
-                            for j in range(i + 1, min(i + 6, search_end)):
-                                next_text = self.paragraphs[j].text.strip()
-                                if not next_text:
-                                    continue
-                                if any(m in next_text for m in output_markers):
-                                    break
-                                if re.match(r'^[一二三四五六七八九十]+、', next_text):
-                                    break
-                                if "不涉及" in next_text:
-                                    input_not_involved = True
-                                    break
-                            break
-                
-                # 查找"输出要素"标记
-                if not found_output_marker:
-                    for marker in output_markers:
-                        if marker in text and ("输出要素" in marker or marker == "输出要素："):
-                            found_output_marker = True
-                            output_marker_index = i
-                            # 检查后续段落（最多5行）是否包含"不涉及"
-                            # 但需要确保"不涉及"紧跟在输出要素标记后，而不是在其他章节中
-                            for j in range(i + 1, min(i + 6, search_end)):
-                                next_text = self.paragraphs[j].text.strip()
-                                if not next_text:
-                                    continue
-                                # 如果遇到章节标题（如"三、操作步骤说明："），停止检查
-                                # 因为"不涉及"可能属于其他章节，而不是输出要素
-                                if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
-                                    # 这是章节标题，停止检查
-                                    break
-                                # 如果遇到其他输入输出相关的标记，也停止检查
-                                if any(m in next_text for m in input_markers + output_markers):
-                                    break
-                                # 检查"不涉及"：如果后续有章节标题，则"不涉及"不属于输出要素
-                                if "不涉及" in next_text and j <= i + 3:
-                                    # 检查后续是否有章节标题（最多检查2行）
-                                    is_in_section = False
-                                    for k in range(j + 1, min(j + 3, search_end)):
-                                        follow_text = self.paragraphs[k].text.strip()
-                                        if re.match(r'^[一二三四五六七八九十]+[、.]', follow_text) and len(follow_text) > 5:
-                                            # "不涉及"后面有章节标题，说明"不涉及"属于该章节，不属于输出要素
-                                            is_in_section = True
-                                            break
-                                    if not is_in_section:
-                                        # "不涉及"后面没有章节标题，说明它属于输出要素
-                                        output_not_involved = True
-                                        break
-                            break
-                
-                if found_input_marker and found_output_marker:
+                # 查找"输入输出要素"子章节（可能包含"三、"、"三、"等编号）
+                if "输入输出要素" in text and ("：" in text or ":" in text):
+                    found_input_output_elements_section = True
+                    search_start_io_elements = i
+                    parser_logger.debug(f"找到输入输出要素子章节，索引: {i}, 文本: {repr(text)}")
                     break
+            
+            # 步骤3：在"输入输出要素"子章节内查找"输入要素"和"输出要素"标记
+            if found_input_output_elements_section:
+                # 在输入输出要素子章节内查找，扩大搜索范围到100个段落
+                for i in range(search_start_io_elements, min(search_start_io_elements + 100, search_end)):
+                    para = self.paragraphs[i]
+                    text = para.text.strip()
+                
+                    # 查找"输入要素"标记（在输入输出要素子章节内）
+                    if not found_input_marker:
+                        for marker in input_markers:
+                            if marker in text and ("输入要素" in marker or marker == "输入要素："):
+                                found_input_marker = True
+                                input_marker_index = i
+                                parser_logger.debug(f"找到输入要素标记，索引: {i}, 文本: {repr(text)}")
+                                # 检查后续段落（最多3行）是否包含"不涉及"（仅在输入输出要素子章节内）
+                                for j in range(i + 1, min(i + 4, search_end)):
+                                    next_text = self.paragraphs[j].text.strip()
+                                    if not next_text:
+                                        continue
+                                    # 如果遇到输出要素标记，停止检查
+                                    if any(m in next_text for m in output_markers):
+                                        break
+                                    # 如果遇到新的章节标题（如"三、操作步骤说明"），停止检查
+                                    if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
+                                        break
+                                    # 检查"不涉及"：仅在输入输出要素子章节内检查
+                                    if "不涉及" in next_text and j <= i + 2:
+                                        input_not_involved = True
+                                        parser_logger.debug(f"输入要素标记为不涉及，索引: {j}")
+                                        break
+                                break
+                
+                    # 查找"输出要素"标记（在输入输出要素子章节内）
+                    # 注意：不能把"输入输出要素："误认为是"输出要素"标记
+                    if not found_output_marker:
+                        for marker in output_markers:
+                            # 确保是"输出要素"而不是"输入输出要素"
+                            if marker in text and ("输出要素" in marker or marker == "输出要素：") and "输入输出要素" not in text:
+                                found_output_marker = True
+                                output_marker_index = i
+                                parser_logger.debug(f"找到输出要素标记，索引: {i}, 文本: {repr(text)}")
+                                # 检查后续段落（最多3行）是否包含"不涉及"（仅在输入输出要素子章节内）
+                                for j in range(i + 1, min(i + 4, search_end)):
+                                    next_text = self.paragraphs[j].text.strip()
+                                    if not next_text:
+                                        continue
+                                    # 如果遇到新的章节标题（如"三、操作步骤说明"），停止检查
+                                    if re.match(r'^[一二三四五六七八九十]+[、.]', next_text) and len(next_text) > 5:
+                                        break
+                                    # 检查"不涉及"：仅在输入输出要素子章节内检查
+                                    if "不涉及" in next_text and j <= i + 2:
+                                        output_not_involved = True
+                                        parser_logger.debug(f"输出要素标记为不涉及，索引: {j}")
+                                        break
+                                break
+                    
+                    if found_input_marker and found_output_marker:
+                        break
         else:
             # 如果没有找到"输入输出说明"，使用原来的逻辑
             for i in range(search_start, search_end):
