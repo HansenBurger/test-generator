@@ -132,21 +132,21 @@ export const getTaskStatus = (taskId) => {
  */
 export const pollTaskUntilComplete = async (taskId, onProgress = null, interval = 1000, timeout = 300000) => {
     const startTime = Date.now()
-    
+
     while (true) {
         // 检查超时
         if (Date.now() - startTime > timeout) {
             throw new Error('任务轮询超时')
         }
-        
+
         try {
             const status = await getTaskStatus(taskId)
-            
+
             // 调用进度回调
             if (onProgress) {
                 onProgress(status.progress, status.status)
             }
-            
+
             // 检查任务状态
             if (status.status === 'completed') {
                 if (status.result && status.result.success) {
@@ -157,10 +157,10 @@ export const pollTaskUntilComplete = async (taskId, onProgress = null, interval 
             } else if (status.status === 'failed') {
                 throw new Error(status.error || '任务处理失败')
             }
-            
+
             // 等待后继续轮询
             await new Promise(resolve => setTimeout(resolve, interval))
-            
+
         } catch (error) {
             // 如果是404，任务不存在
             if (error.response && error.response.status === 404) {
@@ -169,6 +169,91 @@ export const pollTaskUntilComplete = async (taskId, onProgress = null, interval 
             throw error
         }
     }
+}
+
+/**
+ * 上传并解析XMind测试大纲
+ * @param {File} file - xmind文件
+ * @returns {Promise}
+ */
+export const parseXmind = (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return api.post('/parse-xmind', formData, {
+        headers: {
+            'Content-Type': 'multipart/form-data'
+        }
+    })
+}
+
+/**
+ * 预生成测试用例
+ * @param {string} parseId
+ * @param {number} count
+ */
+export const previewGenerate = (parseId, count = 4) => {
+    return api.post('/preview-generate', {
+        parse_id: parseId,
+        count
+    })
+}
+
+/**
+ * 确认预生成
+ * @param {string} previewId
+ * @param {string} strategy
+ */
+export const confirmPreview = (previewId, strategy = 'standard') => {
+    return api.post('/confirm-preview', {
+        preview_id: previewId,
+        strategy
+    })
+}
+
+/**
+ * 批量生成
+ * @param {string} parseId
+ * @param {string} strategy
+ */
+export const bulkGenerate = (parseId, strategy = 'standard') => {
+    return api.post('/bulk-generate', {
+        parse_id: parseId,
+        strategy
+    })
+}
+
+/**
+ * 查询生成任务状态
+ * @param {string} taskId
+ */
+export const getGenerationStatus = (taskId) => {
+    return api.get(`/generation-status?task_id=${taskId}`)
+}
+
+/**
+ * 重新生成
+ * @param {string} taskId
+ * @param {string} strategy
+ */
+export const retryGeneration = (taskId, strategy = 'standard') => {
+    return api.post('/retry-generation', {
+        task_id: taskId,
+        strategy
+    })
+}
+
+/**
+ * 导出测试用例
+ * @param {string} requirementName
+ * @param {Array} cases
+ */
+export const exportCases = (requirementName, cases) => {
+    return api.post('/export-cases', {
+        requirement_name: requirementName,
+        cases
+    }, {
+        responseType: 'blob'
+    })
 }
 
 export default api

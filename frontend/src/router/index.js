@@ -1,11 +1,23 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Home from '../views/Home.vue'
+import Dashboard from '../views/Dashboard.vue'
+import OutlineToCases from '../views/OutlineToCases.vue'
 
 const routes = [
     {
         path: '/',
-        name: 'Home',
+        name: 'Dashboard',
+        component: Dashboard
+    },
+    {
+        path: '/outline-generation',
+        name: 'OutlineGeneration',
         component: Home
+    },
+    {
+        path: '/outline-to-cases',
+        name: 'OutlineToCases',
+        component: OutlineToCases
     }
 ]
 

@@ -12,10 +12,16 @@ from typing import Optional
 
 from app.models.schemas import (
     ParseResponse, ParsedDocument, GenerateOutlineRequest,
-    TaskCreateResponse, TaskStatusResponse
+    TaskCreateResponse, TaskStatusResponse,
+    ParseXmindResponse, PreviewGenerateRequest, PreviewGenerateResponse,
+    ConfirmPreviewRequest, BulkGenerateRequest, GenerationStatusResponse,
+    RetryGenerationRequest, ExportCasesRequest
 )
 from app.services.doc_parser import DocumentParser
 from app.services.xmind_generator import XMindGenerator
+from app.services.xmind_parser import XMindParser
+from app.services.case_generation import case_generation_manager
+from app.services.case_xmind_generator import CaseXMindGenerator
 from app.utils.logger import api_logger, parser_logger, generator_logger
 from app.utils.task_manager import task_manager, TaskStatus
 from datetime import datetime
@@ -410,4 +416,196 @@ async def generate_outline_from_json(parsed_data: ParsedDocument):
         error_detail = f"生成大纲失败：{str(e)}\n{traceback.format_exc()}"
         api_logger.error(f"从JSON生成大纲失败 - 文档名称: {doc_name}, 耗时: {elapsed_time:.3f}秒, 错误: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=error_detail)
+
+
+@router.post("/parse-xmind", response_model=ParseXmindResponse)
+async def parse_xmind(file: UploadFile = File(...)):
+    """上传并解析XMind测试大纲"""
+    api_logger.info(f"收到XMind解析请求 - 文件名: {file.filename}")
+
+    if not file.filename.endswith(".xmind"):
+        return ParseXmindResponse(
+            success=False,
+            message="不支持的文件类型，请上传XMind文件（.xmind）"
+        )
+
+    tmp_path = None
+    try:
+        content = await file.read()
+        if not content:
+            return ParseXmindResponse(success=False, message="上传的文件为空")
+
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".xmind")
+        tmp_path = tmp_file.name
+        try:
+            tmp_file.write(content)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        finally:
+            tmp_file.close()
+
+        parser = XMindParser(tmp_path)
+        parsed = parser.parse()
+        case_generation_manager.save_parsed_doc(parsed)
+
+        return ParseXmindResponse(
+            success=True,
+            message="XMind解析成功",
+            data=parsed
+        )
+    except Exception as exc:
+        api_logger.error(f"XMind解析失败 - 文件名: {file.filename}, 错误: {str(exc)}", exc_info=True)
+        return ParseXmindResponse(success=False, message=f"解析失败：{str(exc)}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+
+
+@router.get("/versions/{requirement_name}")
+async def get_versions(requirement_name: str):
+    """获取需求历史解析版本"""
+    versions = case_generation_manager.list_versions(requirement_name)
+    return {
+        "requirement_name": requirement_name,
+        "versions": versions
+    }
+
+
+@router.post("/preview-generate", response_model=PreviewGenerateResponse)
+async def preview_generate(request: PreviewGenerateRequest):
+    """预生成测试用例"""
+    try:
+        preview_id, cases, token_usage, logs = case_generation_manager.generate_preview(
+            request.parse_id,
+            request.count
+        )
+        if logs:
+            for log in logs:
+                generator_logger.warning(log)
+        return PreviewGenerateResponse(
+            success=True,
+            message="预生成完成",
+            preview_id=preview_id,
+            cases=cases
+        )
+    except Exception as exc:
+        api_logger.error(f"预生成失败 - 错误: {str(exc)}", exc_info=True)
+        return PreviewGenerateResponse(success=False, message=f"预生成失败：{str(exc)}")
+
+
+@router.post("/confirm-preview", response_model=TaskCreateResponse)
+async def confirm_preview(request: ConfirmPreviewRequest):
+    """确认预生成结果，开始生成剩余测试点"""
+    try:
+        task_id, _ = case_generation_manager.create_task_from_preview(
+            request.preview_id,
+            request.strategy or "standard"
+        )
+        return TaskCreateResponse(
+            success=True,
+            task_id=task_id,
+            message="生成任务已提交"
+        )
+    except Exception as exc:
+        api_logger.error(f"确认预生成失败 - 错误: {str(exc)}", exc_info=True)
+        return TaskCreateResponse(
+            success=False,
+            task_id="",
+            message=f"确认预生成失败：{str(exc)}"
+        )
+
+
+@router.post("/bulk-generate", response_model=TaskCreateResponse)
+async def bulk_generate(request: BulkGenerateRequest):
+    """批量生成测试用例"""
+    try:
+        task_id = case_generation_manager.create_task_for_parse(
+            request.parse_id,
+            request.strategy or "standard"
+        )
+        return TaskCreateResponse(
+            success=True,
+            task_id=task_id,
+            message="生成任务已提交"
+        )
+    except Exception as exc:
+        api_logger.error(f"批量生成失败 - 错误: {str(exc)}", exc_info=True)
+        return TaskCreateResponse(
+            success=False,
+            task_id="",
+            message=f"批量生成失败：{str(exc)}"
+        )
+
+
+@router.get("/generation-status", response_model=GenerationStatusResponse)
+async def generation_status(task_id: str):
+    """查看生成进度与结果"""
+    task = case_generation_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="生成任务不存在")
+
+    return GenerationStatusResponse(
+        task_id=task.task_id,
+        status=task.status,
+        progress=task.progress,
+        total=task.total,
+        completed=task.completed,
+        failed=task.failed,
+        logs=task.logs,
+        cases=task.cases,
+        token_usage=task.token_usage,
+        error=task.error
+    )
+
+
+@router.post("/retry-generation", response_model=TaskCreateResponse)
+async def retry_generation(request: RetryGenerationRequest):
+    """重新生成测试用例"""
+    task = case_generation_manager.get_task(request.task_id)
+    if not task:
+        return TaskCreateResponse(
+            success=False,
+            task_id="",
+            message="原任务不存在"
+        )
+
+    task_id = case_generation_manager.create_generation_task(
+        requirement_name=task.requirement_name,
+        points=task.points,
+        strategy=request.strategy or "standard",
+        initial_cases=[]
+    )
+    return TaskCreateResponse(
+        success=True,
+        task_id=task_id,
+        message="重新生成任务已提交"
+    )
+
+
+@router.post("/export-cases")
+async def export_cases(request: ExportCasesRequest):
+    """导出测试用例为XMind"""
+    try:
+        generator = CaseXMindGenerator(request.requirement_name, request.cases)
+        xmind_bytes = generator.generate()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{request.requirement_name or '测试用例'}-{timestamp}.xmind"
+        import urllib.parse
+        encoded_filename = urllib.parse.quote(filename.encode("utf-8"))
+
+        return StreamingResponse(
+            io.BytesIO(xmind_bytes),
+            media_type="application/xmind",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+                "Content-Type": "application/xmind"
+            }
+        )
+    except Exception as exc:
+        api_logger.error(f"导出测试用例失败 - 错误: {str(exc)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"导出失败：{str(exc)}")
 

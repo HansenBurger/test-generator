@@ -115,3 +115,94 @@ class TaskStatusResponse(BaseModel):
     error: Optional[str] = None
     result: Optional[ParseResponse] = None
 
+
+class TestPoint(BaseModel):
+    """测试点"""
+    point_id: str
+    point_type: str  # process / rule
+    subtype: Optional[str] = None  # positive / negative
+    priority: Optional[int] = None  # 1/2/3
+    text: str
+    context: Optional[str] = None
+
+
+class ParsedXmindDocument(BaseModel):
+    """XMind解析结果"""
+    parse_id: str
+    requirement_name: str
+    document_type: str  # modeling / non_modeling
+    test_points: List[TestPoint] = []
+    stats: Dict[str, Any] = {}
+
+
+class ParseXmindResponse(BaseModel):
+    """XMind解析响应"""
+    success: bool
+    message: str
+    data: Optional[ParsedXmindDocument] = None
+
+
+class TestCase(BaseModel):
+    """生成的测试用例"""
+    case_id: str
+    point_id: str
+    point_type: str
+    subtype: Optional[str] = None
+    priority: Optional[int] = None
+    text: str
+    preconditions: List[str] = []
+    steps: List[str] = []
+    expected_results: List[str] = []
+
+
+class PreviewGenerateRequest(BaseModel):
+    """预生成请求"""
+    parse_id: str
+    count: Optional[int] = None
+
+
+class PreviewGenerateResponse(BaseModel):
+    """预生成响应"""
+    success: bool
+    message: str
+    preview_id: Optional[str] = None
+    cases: List[TestCase] = []
+
+
+class ConfirmPreviewRequest(BaseModel):
+    """确认预生成请求"""
+    preview_id: str
+    strategy: Optional[str] = "standard"
+
+
+class BulkGenerateRequest(BaseModel):
+    """批量生成请求"""
+    parse_id: str
+    strategy: Optional[str] = "standard"
+
+
+class GenerationStatusResponse(BaseModel):
+    """生成任务状态响应"""
+    task_id: str
+    status: str
+    progress: float
+    total: int
+    completed: int
+    failed: int
+    logs: List[str] = []
+    cases: List[TestCase] = []
+    token_usage: int = 0
+    error: Optional[str] = None
+
+
+class RetryGenerationRequest(BaseModel):
+    """重新生成请求"""
+    task_id: str
+    strategy: Optional[str] = "standard"
+
+
+class ExportCasesRequest(BaseModel):
+    """导出测试用例请求"""
+    requirement_name: str
+    cases: List[TestCase] = []
+
