@@ -101,6 +101,7 @@ class TaskCreateResponse(BaseModel):
     success: bool
     task_id: str
     message: str
+    session_id: Optional[str] = None
 
 
 class TaskStatusResponse(BaseModel):
@@ -131,6 +132,12 @@ class ParsedXmindDocument(BaseModel):
     parse_id: str
     requirement_name: str
     document_type: str  # modeling / non_modeling
+    document_number: Optional[str] = None
+    customer: Optional[str] = None
+    product: Optional[str] = None
+    channel: Optional[str] = None
+    partner: Optional[str] = None
+    designer: Optional[str] = None
     test_points: List[TestPoint] = []
     stats: Dict[str, Any] = {}
 
@@ -140,6 +147,7 @@ class ParseXmindResponse(BaseModel):
     success: bool
     message: str
     data: Optional[ParsedXmindDocument] = None
+    conflict: Optional[bool] = None
 
 
 class TestCase(BaseModel):
@@ -159,6 +167,8 @@ class PreviewGenerateRequest(BaseModel):
     """预生成请求"""
     parse_id: str
     count: Optional[int] = None
+    session_id: Optional[str] = None
+    prompt_version: Optional[str] = None
 
 
 class PreviewGenerateResponse(BaseModel):
@@ -173,12 +183,16 @@ class ConfirmPreviewRequest(BaseModel):
     """确认预生成请求"""
     preview_id: str
     strategy: Optional[str] = "standard"
+    session_id: Optional[str] = None
+    prompt_version: Optional[str] = None
 
 
 class BulkGenerateRequest(BaseModel):
     """批量生成请求"""
     parse_id: str
     strategy: Optional[str] = "standard"
+    session_id: Optional[str] = None
+    prompt_version: Optional[str] = None
 
 
 class GenerationStatusResponse(BaseModel):
@@ -193,12 +207,30 @@ class GenerationStatusResponse(BaseModel):
     cases: List[TestCase] = []
     token_usage: int = 0
     error: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class RetryGenerationRequest(BaseModel):
     """重新生成请求"""
     task_id: str
     strategy: Optional[str] = "standard"
+    session_id: Optional[str] = None
+
+
+class GenerationRecordResponse(BaseModel):
+    """生成记录响应"""
+    session_id: str
+    parse_record_id: str
+    prompt_strategy: Optional[str] = None
+    prompt_version: Optional[str] = None
+    generation_mode: Optional[str] = None
+    status: str
+    success_count: int
+    fail_count: int
+    start_time: str
+    completed_at: Optional[str] = None
+    json_path: Optional[str] = None
+    xmind_path: Optional[str] = None
 
 
 class ExportCasesRequest(BaseModel):

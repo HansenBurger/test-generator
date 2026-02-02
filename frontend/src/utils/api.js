@@ -256,6 +256,26 @@ export const exportCases = (requirementName, cases) => {
     })
 }
 
+/**
+ * 根据session_id导出测试用例
+ * @param {string} sessionId
+ */
+export const exportCasesBySession = (sessionId) => {
+    return api.get(`/export-cases-by-session?session_id=${sessionId}`, {
+        responseType: 'blob'
+    })
+}
+
+/**
+ * 根据session_id导出测试用例（包含响应头）
+ * @param {string} sessionId
+ */
+export const exportCasesBySessionWithHeaders = (sessionId) => {
+    return axios.get(`/api/export-cases-by-session?session_id=${sessionId}`, {
+        responseType: 'blob'
+    })
+}
+
 export default api
 
 

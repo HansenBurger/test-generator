@@ -4,7 +4,7 @@
 import json
 import os
 import re
-from typing import Any, Dict, Tuple
+from typing import Any, Tuple
 
 from openai import OpenAI
 
@@ -13,7 +13,7 @@ class AIClient:
     """百炼兼容接口客户端"""
 
     def __init__(self):
-        api_key = os.getenv("DASHSCOPE_API_KEY") or "YOUR_DASHSCOPE_API_KEY"
+        api_key = os.getenv("DASHSCOPE_API_KEY") or "sk-9288f48e2c76435997bac1d02ccc4aa9"
         if not api_key:
             raise ValueError("缺少 DASHSCOPE_API_KEY 环境变量")
         self._client = OpenAI(
@@ -28,7 +28,7 @@ class AIClient:
         model: str = "qwen-plus",
         temperature: float = 0.2,
         max_tokens: int = 800
-    ) -> Tuple[Dict[str, Any], int]:
+    ) -> Tuple[Any, int]:
         response = self._client.chat.completions.create(
             model=model,
             messages=[
@@ -44,14 +44,37 @@ class AIClient:
         total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
         return json_data, total_tokens
 
-    def _extract_json(self, content: str) -> Dict[str, Any]:
+    def _extract_json(self, content: str) -> Any:
         content = content.strip()
-        if content.startswith("{") and content.endswith("}"):
-            return json.loads(content)
+        if not content:
+            raise ValueError("模型返回内容为空")
 
-        # 尝试从代码块中提取
-        match = re.search(r"\{[\s\S]*\}", content)
-        if match:
-            return json.loads(match.group(0))
+        # 优先解析代码块内容
+        if "```" in content:
+            fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content, re.IGNORECASE)
+            if fence_match:
+                content = fence_match.group(1).strip()
 
-        raise ValueError("模型返回内容无法解析为JSON")
+        # 从首个 JSON 起始符开始解析，忽略尾部多余内容
+        start_candidates = [pos for pos in (content.find("{"), content.find("[")) if pos != -1]
+        if not start_candidates:
+            raise ValueError("模型返回内容无法解析为JSON")
+        start = min(start_candidates)
+        decoder = json.JSONDecoder()
+        try:
+            obj, _ = decoder.raw_decode(content[start:])
+            return obj
+        except json.JSONDecodeError:
+            trimmed = self._trim_json_tail(content[start:])
+            if trimmed:
+                obj, _ = decoder.raw_decode(trimmed)
+                return obj
+            raise
+
+    def _trim_json_tail(self, text: str) -> str:
+        last_obj = text.rfind("}")
+        last_arr = text.rfind("]")
+        last = max(last_obj, last_arr)
+        if last == -1:
+            return ""
+        return text[: last + 1]

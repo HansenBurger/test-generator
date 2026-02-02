@@ -33,7 +33,8 @@ class XMindParser:
             raise ValueError("XMind文件解析失败：未找到根主题节点")
 
         root_title = self._get_title(root_topic)
-        requirement_name = self._normalize_requirement_name(root_title) or "测试大纲"
+        document_number, requirement_name = self._parse_root_title(root_title)
+        requirement_name = requirement_name or "测试大纲"
 
         titles = set()
         test_points: List[TestPoint] = []
@@ -49,12 +50,19 @@ class XMindParser:
             point.point_id = f"TP{idx:03d}"
 
         stats = self._build_stats(filtered_points)
+        basic_info = self._extract_basic_info(root_topic)
 
         parse_id = uuid4().hex
         return ParsedXmindDocument(
             parse_id=parse_id,
             requirement_name=requirement_name,
             document_type=document_type,
+            document_number=document_number,
+            customer=basic_info.get("customer"),
+            product=basic_info.get("product"),
+            channel=basic_info.get("channel"),
+            partner=basic_info.get("partner"),
+            designer=basic_info.get("designer"),
             test_points=filtered_points,
             stats=stats
         )
@@ -130,13 +138,47 @@ class XMindParser:
             return f"{context} - {title}"
         return title
 
-    def _normalize_requirement_name(self, title: str) -> str:
+    def _parse_root_title(self, title: str) -> Tuple[Optional[str], str]:
         if not title:
-            return ""
-        # 常见格式：需求项目编号-xxx
-        if "需求项目编号" in title and "-" in title:
-            return title.split("-", 1)[-1].strip()
-        return title.strip()
+            return None, ""
+        if "-" in title:
+            left, right = title.split("-", 1)
+            return left.strip() or None, right.strip()
+        return None, title.strip()
+
+    def _extract_basic_info(self, root_topic: ET.Element) -> dict:
+        info = {
+            "customer": None,
+            "product": None,
+            "channel": None,
+            "partner": None,
+            "designer": None
+        }
+        for child in self._get_children(root_topic):
+            if self._get_title(child) != "基础信息":
+                continue
+            for item in self._get_children(child):
+                title = self._get_title(item)
+                if not title:
+                    continue
+                value = ""
+                if "：" in title:
+                    _, value = title.split("：", 1)
+                elif ":" in title:
+                    _, value = title.split(":", 1)
+                value = value.strip()
+                if title.startswith("客户"):
+                    info["customer"] = value or None
+                elif title.startswith("产品"):
+                    info["product"] = value or None
+                elif title.startswith("渠道"):
+                    info["channel"] = value or None
+                elif title.startswith("合作方"):
+                    info["partner"] = value or None
+                elif title.startswith("设计者"):
+                    info["designer"] = value or None
+            break
+        return info
 
     def _parse_priority(self, topic: ET.Element, title: str) -> Tuple[Optional[int], str]:
         marker_priority = self._get_marker_priority(topic)

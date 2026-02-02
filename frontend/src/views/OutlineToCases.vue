@@ -1,6 +1,8 @@
 <template>
   <div class="case-container">
-    <el-card class="upload-card" shadow="hover">
+    <el-tabs v-model="activeTab" class="case-tabs">
+      <el-tab-pane label="生成用例" name="generate">
+        <el-card class="upload-card" shadow="hover">
       <template #header>
         <div class="card-header">
           <span>上传XMind测试大纲</span>
@@ -163,6 +165,7 @@
       <el-progress :percentage="Math.round((generationStatus?.progress || 0) * 100)" />
       <div class="progress-meta">
         <div>任务ID：{{ generationTaskId }}</div>
+        <div v-if="currentSessionId">SessionID：{{ currentSessionId }}</div>
         <div>已完成：{{ generationStatus?.completed || 0 }} / {{ generationStatus?.total || 0 }}</div>
         <div>Token消耗：{{ generationStatus?.token_usage || 0 }}</div>
       </div>
@@ -205,6 +208,29 @@
         <el-button type="primary" @click="saveEdit">保存</el-button>
       </template>
     </el-dialog>
+      </el-tab-pane>
+
+      <el-tab-pane label="按Session导出" name="session">
+        <el-card class="session-card" shadow="hover">
+          <template #header>
+            <div class="card-header">
+              <span>通过 session_id 重新生成并导出 XMind</span>
+            </div>
+          </template>
+          <div class="session-actions">
+            <el-input
+              v-model="sessionIdInput"
+              placeholder="请输入 session_id"
+              clearable
+              style="max-width: 420px"
+            />
+            <el-button type="primary" :loading="sessionExportLoading" @click="handleExportBySession">
+              导出XMind
+            </el-button>
+          </div>
+        </el-card>
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
@@ -218,7 +244,9 @@ import {
   confirmPreview,
   bulkGenerate,
   getGenerationStatus,
-  exportCases
+  exportCases,
+  exportCasesBySession,
+  exportCasesBySessionWithHeaders
 } from '../utils/api'
 
 const uploadRef = ref(null)
@@ -230,8 +258,12 @@ const previewCases = ref([])
 const previewId = ref('')
 const generationTaskId = ref('')
 const generationStatus = ref(null)
+const currentSessionId = ref('')
 const strategy = ref('standard')
 const exportLoading = ref(false)
+const activeTab = ref('generate')
+const sessionIdInput = ref('')
+const sessionExportLoading = ref(false)
 
 let pollTimer = null
 
@@ -262,6 +294,7 @@ const handleParse = async () => {
     previewId.value = ''
     generationTaskId.value = ''
     generationStatus.value = null
+    currentSessionId.value = ''
     ElMessage.success('解析成功')
   } catch (error) {
     ElMessage.error(error.message || '解析失败')
@@ -302,8 +335,9 @@ const handleConfirm = async () => {
       throw new Error(res.message || '任务提交失败')
     }
     generationTaskId.value = res.task_id
+    currentSessionId.value = res.session_id || ''
     startPolling(res.task_id)
-    ElMessage.success('生成任务已提交')
+    ElMessage.success(`生成任务已提交${res.session_id ? `，session_id: ${res.session_id}` : ''}`)
   } catch (error) {
     ElMessage.error(error.message || '任务提交失败')
   }
@@ -320,8 +354,9 @@ const handleBulkGenerate = async () => {
       throw new Error(res.message || '任务提交失败')
     }
     generationTaskId.value = res.task_id
+    currentSessionId.value = res.session_id || ''
     startPolling(res.task_id)
-    ElMessage.success('生成任务已提交')
+    ElMessage.success(`生成任务已提交${res.session_id ? `，session_id: ${res.session_id}` : ''}`)
   } catch (error) {
     ElMessage.error(error.message || '任务提交失败')
   }
@@ -333,6 +368,9 @@ const startPolling = async (taskId) => {
     try {
       const status = await getGenerationStatus(taskId)
       generationStatus.value = status
+      if (status.session_id) {
+        currentSessionId.value = status.session_id
+      }
       if (status.status === 'completed' || status.status === 'failed') {
         stopPolling()
         return
@@ -360,6 +398,7 @@ const resetAll = () => {
   previewId.value = ''
   generationTaskId.value = ''
   generationStatus.value = null
+  currentSessionId.value = ''
   fileList.value = []
   if (uploadRef.value) {
     uploadRef.value.clearFiles()
@@ -399,12 +438,29 @@ const saveEdit = () => {
 }
 
 const handleExport = async () => {
-  if (!generationStatus.value?.cases?.length) {
-    ElMessage.warning('暂无可导出的用例')
-    return
-  }
   exportLoading.value = true
   try {
+    if (currentSessionId.value) {
+      const response = await exportCasesBySessionWithHeaders(currentSessionId.value)
+      const blob = response.data
+      const filename = resolveDownloadName(
+        response.headers?.['content-disposition'],
+        parsedData.value?.requirement_name
+      )
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      return
+    }
+    if (!generationStatus.value?.cases?.length) {
+      ElMessage.warning('暂无可导出的用例')
+      return
+    }
     const blob = await exportCases(parsedData.value?.requirement_name || '测试用例', generationStatus.value.cases)
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -421,13 +477,77 @@ const handleExport = async () => {
   }
 }
 
+const handleExportBySession = async () => {
+  if (!sessionIdInput.value) {
+    ElMessage.warning('请输入 session_id')
+    return
+  }
+  sessionExportLoading.value = true
+  try {
+    const response = await exportCasesBySessionWithHeaders(sessionIdInput.value.trim())
+    const blob = response.data
+    const filename = resolveDownloadName(
+      response.headers?.['content-disposition'],
+      parsedData.value?.requirement_name
+    )
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  } catch (error) {
+    ElMessage.error(error.message || '导出失败')
+  } finally {
+    sessionExportLoading.value = false
+  }
+}
+
 onBeforeUnmount(() => {
   stopPolling()
 })
+
+const resolveDownloadName = (contentDisposition, requirementName) => {
+  const filenameFromHeader = parseFilename(contentDisposition)
+  if (filenameFromHeader) {
+    return filenameFromHeader
+  }
+  const name = requirementName || '测试用例'
+  return `测试用例_${name}_${formatTimestamp()}.xmind`
+}
+
+const parseFilename = (contentDisposition) => {
+  if (!contentDisposition) return ''
+  const utf8Match = contentDisposition.match(/filename\*\=UTF-8''([^;]+)/i)
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+  const plainMatch = contentDisposition.match(/filename=([^;]+)/i)
+  if (plainMatch && plainMatch[1]) {
+    return plainMatch[1].replace(/\"/g, '')
+  }
+  return ''
+}
+
+const formatTimestamp = () => {
+  const now = new Date()
+  const pad = (v) => String(v).padStart(2, '0')
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+}
 </script>
 
 <style scoped>
 .case-container {
+  width: 100%;
+}
+
+.case-tabs {
   width: 100%;
 }
 
@@ -473,6 +593,12 @@ onBeforeUnmount(() => {
 }
 
 .confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.session-actions {
   display: flex;
   align-items: center;
   gap: 12px;

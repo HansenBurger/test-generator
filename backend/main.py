@@ -4,6 +4,7 @@ FastAPI 主应用入口
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import router
+from app.db import init_db
 from app.utils.middleware import LoggingMiddleware
 from app.utils.logger import logger
 
@@ -30,6 +31,13 @@ app.include_router(router, prefix="/api")
 
 # 记录应用启动
 logger.info("FastAPI应用启动")
+
+# 初始化数据库
+try:
+    init_db()
+    logger.info("数据库初始化完成")
+except Exception as exc:
+    logger.error(f"数据库初始化失败: {str(exc)}", exc_info=True)
 
 # 启动LibreOffice守护进程（用于加速.doc文件转换）
 try:

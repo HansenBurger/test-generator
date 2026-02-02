@@ -6,6 +6,9 @@ import os
 import re
 import tempfile
 import asyncio
+import hashlib
+import json
+from uuid import uuid4
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from typing import Optional
@@ -15,7 +18,7 @@ from app.models.schemas import (
     TaskCreateResponse, TaskStatusResponse,
     ParseXmindResponse, PreviewGenerateRequest, PreviewGenerateResponse,
     ConfirmPreviewRequest, BulkGenerateRequest, GenerationStatusResponse,
-    RetryGenerationRequest, ExportCasesRequest
+    RetryGenerationRequest, ExportCasesRequest, GenerationRecordResponse, ParsedXmindDocument, TestCase
 )
 from app.services.doc_parser import DocumentParser
 from app.services.xmind_generator import XMindGenerator
@@ -24,6 +27,8 @@ from app.services.case_generation import case_generation_manager
 from app.services.case_xmind_generator import CaseXMindGenerator
 from app.utils.logger import api_logger, parser_logger, generator_logger
 from app.utils.task_manager import task_manager, TaskStatus
+from app.db import repository
+from app.utils.storage import get_parsed_dir, save_json, get_xmind_dir
 from datetime import datetime
 
 router = APIRouter()
@@ -68,6 +73,27 @@ def sanitize_error_message(error_msg: str, filename: str) -> str:
         return f"{filename} 解析失败：{error_msg}"
     else:
         return f"解析失败：{error_msg}"
+
+
+def _parse_xmind_filename(filename: str) -> tuple[str, Optional[str], Optional[str]]:
+    name = os.path.splitext(filename or "")[0]
+    pattern = r"^(?P<req>.+)_V(?P<ver>[^_]+)_(?P<time>.+)$"
+    match = re.match(pattern, name)
+    if not match:
+        return name or "测试大纲", None, None
+    return match.group("req"), match.group("ver"), match.group("time")
+
+
+def _compute_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _load_parsed_from_path(path: str) -> Optional[ParsedXmindDocument]:
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return ParsedXmindDocument(**data)
 
 
 @router.post("/parse-doc", response_model=ParseResponse)
@@ -435,6 +461,34 @@ async def parse_xmind(file: UploadFile = File(...)):
         if not content:
             return ParseXmindResponse(success=False, message="上传的文件为空")
 
+        requirement_name, version, outline_time = _parse_xmind_filename(file.filename or "")
+        outline_hash = _compute_hash(content)
+
+        record_by_hash = repository.get_parse_record_by_hash(outline_hash)
+        if record_by_hash and record_by_hash.json_path:
+            parsed = _load_parsed_from_path(record_by_hash.json_path)
+            if parsed:
+                case_generation_manager.save_parsed_doc(parsed)
+                return ParseXmindResponse(
+                    success=True,
+                    message="已存在相同大纲，复用解析结果",
+                    data=parsed,
+                    conflict=False
+                )
+
+        record_by_version_time = repository.get_parse_record_by_version_time(
+            requirement_name,
+            version,
+            outline_time
+        )
+        if record_by_version_time:
+            return ParseXmindResponse(
+                success=False,
+                message="版本号与时间一致但内容不同，请确认后再上传",
+                data=None,
+                conflict=True
+            )
+
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".xmind")
         tmp_path = tmp_file.name
         try:
@@ -445,16 +499,40 @@ async def parse_xmind(file: UploadFile = File(...)):
             tmp_file.close()
 
         parser = XMindParser(tmp_path)
+        parse_id = uuid4().hex
+        repository.create_parse_record(
+            parse_id=parse_id,
+            requirement_name=requirement_name,
+            version=version,
+            outline_time=outline_time,
+            outline_hash=outline_hash,
+            status="processing"
+        )
+
         parsed = parser.parse()
+        parsed.parse_id = parse_id
+        parsed.requirement_name = requirement_name or parsed.requirement_name
         case_generation_manager.save_parsed_doc(parsed)
+        parsed_dir = get_parsed_dir()
+        parsed_path = os.path.join(parsed_dir, f"parsed_{parse_id}.json")
+        save_json(parsed_path, parsed.model_dump())
+        repository.update_parse_record(
+            parse_id=parse_id,
+            status="completed",
+            test_point_count=len(parsed.test_points),
+            json_path=parsed_path
+        )
 
         return ParseXmindResponse(
             success=True,
             message="XMind解析成功",
-            data=parsed
+            data=parsed,
+            conflict=False
         )
     except Exception as exc:
         api_logger.error(f"XMind解析失败 - 文件名: {file.filename}, 错误: {str(exc)}", exc_info=True)
+        if "parse_id" in locals():
+            repository.update_parse_record(parse_id, status="failed")
         return ParseXmindResponse(success=False, message=f"解析失败：{str(exc)}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -500,21 +578,25 @@ async def preview_generate(request: PreviewGenerateRequest):
 async def confirm_preview(request: ConfirmPreviewRequest):
     """确认预生成结果，开始生成剩余测试点"""
     try:
-        task_id, _ = case_generation_manager.create_task_from_preview(
+        task_id, _, session_id = case_generation_manager.create_task_from_preview(
             request.preview_id,
-            request.strategy or "standard"
+            request.strategy or "standard",
+            session_id=request.session_id,
+            prompt_version=request.prompt_version
         )
         return TaskCreateResponse(
             success=True,
             task_id=task_id,
-            message="生成任务已提交"
+            message="生成任务已提交",
+            session_id=session_id
         )
     except Exception as exc:
         api_logger.error(f"确认预生成失败 - 错误: {str(exc)}", exc_info=True)
         return TaskCreateResponse(
             success=False,
             task_id="",
-            message=f"确认预生成失败：{str(exc)}"
+            message=f"确认预生成失败：{str(exc)}",
+            session_id=request.session_id
         )
 
 
@@ -522,21 +604,25 @@ async def confirm_preview(request: ConfirmPreviewRequest):
 async def bulk_generate(request: BulkGenerateRequest):
     """批量生成测试用例"""
     try:
-        task_id = case_generation_manager.create_task_for_parse(
+        task_id, session_id = case_generation_manager.create_task_for_parse(
             request.parse_id,
-            request.strategy or "standard"
+            request.strategy or "standard",
+            session_id=request.session_id,
+            prompt_version=request.prompt_version
         )
         return TaskCreateResponse(
             success=True,
             task_id=task_id,
-            message="生成任务已提交"
+            message="生成任务已提交",
+            session_id=session_id
         )
     except Exception as exc:
         api_logger.error(f"批量生成失败 - 错误: {str(exc)}", exc_info=True)
         return TaskCreateResponse(
             success=False,
             task_id="",
-            message=f"批量生成失败：{str(exc)}"
+            message=f"批量生成失败：{str(exc)}",
+            session_id=request.session_id
         )
 
 
@@ -557,31 +643,82 @@ async def generation_status(task_id: str):
         logs=task.logs,
         cases=task.cases,
         token_usage=task.token_usage,
-        error=task.error
+        error=task.error,
+        session_id=task.session_id
+    )
+
+
+@router.get("/generation-record/{session_id}", response_model=GenerationRecordResponse)
+async def get_generation_record(session_id: str):
+    """查询生成记录"""
+    record = repository.get_generation_record(session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="生成记录不存在")
+    return GenerationRecordResponse(
+        session_id=record.session_id,
+        parse_record_id=record.parse_record_id,
+        prompt_strategy=record.prompt_strategy,
+        prompt_version=record.prompt_version,
+        generation_mode=record.generation_mode,
+        status=record.status,
+        success_count=record.success_count,
+        fail_count=record.fail_count,
+        start_time=record.start_time.isoformat(),
+        completed_at=record.completed_at.isoformat() if record.completed_at else None,
+        json_path=record.json_path,
+        xmind_path=record.xmind_path
     )
 
 
 @router.post("/retry-generation", response_model=TaskCreateResponse)
 async def retry_generation(request: RetryGenerationRequest):
     """重新生成测试用例"""
+    if request.session_id:
+        record = repository.get_generation_record(request.session_id)
+        if not record:
+            return TaskCreateResponse(
+                success=False,
+                task_id="",
+                message="生成记录不存在",
+                session_id=request.session_id
+            )
+        task_id, session_id = case_generation_manager.create_task_for_parse(
+            record.parse_record_id,
+            request.strategy or record.prompt_strategy or "standard",
+            session_id=record.session_id,
+            prompt_version=record.prompt_version
+        )
+        return TaskCreateResponse(
+            success=True,
+            task_id=task_id,
+            message="重新生成任务已提交",
+            session_id=session_id
+        )
+
     task = case_generation_manager.get_task(request.task_id)
     if not task:
         return TaskCreateResponse(
             success=False,
             task_id="",
-            message="原任务不存在"
+            message="原任务不存在",
+            session_id=request.session_id
         )
 
-    task_id = case_generation_manager.create_generation_task(
+    task_id, session_id = case_generation_manager.create_generation_task(
         requirement_name=task.requirement_name,
+        parse_id=task.parse_id,
         points=task.points,
         strategy=request.strategy or "standard",
-        initial_cases=[]
+        initial_cases=[],
+        session_id=request.session_id,
+        prompt_version=task.prompt_version,
+        generation_mode=task.generation_mode
     )
     return TaskCreateResponse(
         success=True,
         task_id=task_id,
-        message="重新生成任务已提交"
+        message="重新生成任务已提交",
+        session_id=session_id
     )
 
 
@@ -589,11 +726,16 @@ async def retry_generation(request: RetryGenerationRequest):
 async def export_cases(request: ExportCasesRequest):
     """导出测试用例为XMind"""
     try:
-        generator = CaseXMindGenerator(request.requirement_name, request.cases)
+        parsed = ParsedXmindDocument(
+            parse_id="",
+            requirement_name=request.requirement_name or "测试用例",
+            document_type="non_modeling"
+        )
+        generator = CaseXMindGenerator(parsed, request.cases)
         xmind_bytes = generator.generate()
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{request.requirement_name or '测试用例'}-{timestamp}.xmind"
+        filename = f"测试用例_{request.requirement_name or '测试用例'}_{timestamp}.xmind"
         import urllib.parse
         encoded_filename = urllib.parse.quote(filename.encode("utf-8"))
 
@@ -608,4 +750,46 @@ async def export_cases(request: ExportCasesRequest):
     except Exception as exc:
         api_logger.error(f"导出测试用例失败 - 错误: {str(exc)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"导出失败：{str(exc)}")
+
+
+@router.get("/export-cases-by-session")
+async def export_cases_by_session(session_id: str):
+    """根据session_id导出测试用例为XMind"""
+    record = repository.get_generation_record(session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="生成记录不存在")
+    if record.status != "completed":
+        raise HTTPException(status_code=400, detail="生成任务未完成，无法导出")
+    parsed_record = repository.get_parse_record(record.parse_record_id)
+    if not parsed_record or not parsed_record.json_path:
+        raise HTTPException(status_code=404, detail="解析记录不存在")
+    parsed = _load_parsed_from_path(parsed_record.json_path)
+    if not parsed:
+        raise HTTPException(status_code=404, detail="解析结果不存在")
+    if not record.json_path or not os.path.exists(record.json_path):
+        raise HTTPException(status_code=404, detail="用例结果不存在")
+    with open(record.json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    cases = [TestCase(**item) for item in data]
+    generator = CaseXMindGenerator(parsed, cases)
+    xmind_bytes = generator.generate()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"测试用例_{parsed.requirement_name}_{timestamp}.xmind"
+    xmind_dir = get_xmind_dir()
+    xmind_path = os.path.join(xmind_dir, filename)
+    with open(xmind_path, "wb") as f:
+        f.write(xmind_bytes)
+    repository.update_generation_record(session_id, xmind_path=xmind_path)
+
+    import urllib.parse
+    encoded_filename = urllib.parse.quote(filename.encode("utf-8"))
+    return StreamingResponse(
+        io.BytesIO(xmind_bytes),
+        media_type="application/xmind",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+            "Content-Type": "application/xmind"
+        }
+    )
 
