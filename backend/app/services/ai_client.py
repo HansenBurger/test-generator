@@ -7,15 +7,16 @@ import re
 from typing import Any, Tuple
 
 from openai import OpenAI
+from app.utils.logger import generator_logger
 
 
 class AIClient:
     """百炼兼容接口客户端"""
 
     def __init__(self):
-        api_key = os.getenv("DASHSCOPE_API_KEY") or "sk-9288f48e2c76435997bac1d02ccc4aa9"
+        api_key = os.getenv("DASHSCOPE_API_KEY")
         if not api_key:
-            raise ValueError("缺少 DASHSCOPE_API_KEY 环境变量")
+            raise ValueError("缺少 DASHSCOPE_API_KEY 环境变量（请在运行环境中配置）")
         self._client = OpenAI(
             api_key=api_key,
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -39,7 +40,19 @@ class AIClient:
             max_tokens=max_tokens
         )
         content = response.choices[0].message.content or ""
-        json_data = self._extract_json(content)
+        try:
+            json_data = self._extract_json(content)
+        except json.JSONDecodeError as exc:
+            # 这里的错误基本都是“模型输出不合法 JSON”（常见：输出被截断、缺少逗号/括号、混入解释文本）
+            head = content[:400].replace("\n", "\\n")
+            tail = content[-400:].replace("\n", "\\n") if len(content) > 400 else ""
+            generator_logger.warning(
+                "模型返回 JSON 解析失败：%s；content_head=%s%s",
+                str(exc),
+                head,
+                f"；content_tail={tail}" if tail else "",
+            )
+            raise ValueError(f"模型返回 JSON 不合法：{str(exc)}") from exc
         usage = getattr(response, "usage", None)
         total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
         return json_data, total_tokens

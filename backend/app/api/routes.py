@@ -481,12 +481,21 @@ async def parse_xmind(file: UploadFile = File(...)):
             version,
             outline_time
         )
+        # 版本号+时间一致，但哈希不同：允许重新解析，并用新哈希覆盖旧记录
+        #（避免过于严格的重复检测导致无法生成）
         if record_by_version_time:
-            return ParseXmindResponse(
-                success=False,
-                message="版本号与时间一致但内容不同，请确认后再上传",
-                data=None,
-                conflict=True
+            parse_id = record_by_version_time.parse_id
+            repository.update_parse_record_outline_hash(parse_id, outline_hash=outline_hash, upload_time=datetime.utcnow())
+            repository.update_parse_record(parse_id=parse_id, status="processing")
+        else:
+            parse_id = uuid4().hex
+            repository.create_parse_record(
+                parse_id=parse_id,
+                requirement_name=requirement_name,
+                version=version,
+                outline_time=outline_time,
+                outline_hash=outline_hash,
+                status="processing"
             )
 
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".xmind")
@@ -499,16 +508,6 @@ async def parse_xmind(file: UploadFile = File(...)):
             tmp_file.close()
 
         parser = XMindParser(tmp_path)
-        parse_id = uuid4().hex
-        repository.create_parse_record(
-            parse_id=parse_id,
-            requirement_name=requirement_name,
-            version=version,
-            outline_time=outline_time,
-            outline_hash=outline_hash,
-            status="processing"
-        )
-
         parsed = parser.parse()
         parsed.parse_id = parse_id
         parsed.requirement_name = requirement_name or parsed.requirement_name
@@ -525,7 +524,7 @@ async def parse_xmind(file: UploadFile = File(...)):
 
         return ParseXmindResponse(
             success=True,
-            message="XMind解析成功",
+            message="XMind解析成功" if not record_by_version_time else "XMind已重新解析并覆盖旧版本",
             data=parsed,
             conflict=False
         )
@@ -627,9 +626,15 @@ async def bulk_generate(request: BulkGenerateRequest):
 
 
 @router.get("/generation-status", response_model=GenerationStatusResponse)
-async def generation_status(task_id: str):
-    """查看生成进度与结果"""
-    task = case_generation_manager.get_task(task_id)
+async def generation_status(task_id: Optional[str] = None, session_id: Optional[str] = None):
+    """查看生成进度与结果（支持 task_id 或 session_id 查询）"""
+    task = None
+    if task_id:
+        task = case_generation_manager.get_task(task_id)
+    elif session_id:
+        task = case_generation_manager.get_task_by_session(session_id)
+    else:
+        raise HTTPException(status_code=400, detail="必须提供 task_id 或 session_id")
     if not task:
         raise HTTPException(status_code=404, detail="生成任务不存在")
 

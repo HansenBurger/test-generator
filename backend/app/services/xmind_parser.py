@@ -42,14 +42,12 @@ class XMindParser:
 
         document_type = "non_modeling" if "功能" in titles else "modeling"
 
-        # 过滤优先级为3的测试点
-        filtered_points = [p for p in test_points if p.priority != 3]
-
-        # 重新编号
-        for idx, point in enumerate(filtered_points, start=1):
+        # 解析阶段保留所有测试点（包括 priority=3）
+        # 生成阶段是否参与生成由后续逻辑控制
+        for idx, point in enumerate(test_points, start=1):
             point.point_id = f"TP{idx:03d}"
 
-        stats = self._build_stats(filtered_points)
+        stats = self._build_stats(test_points)
         basic_info = self._extract_basic_info(root_topic)
 
         parse_id = uuid4().hex
@@ -63,7 +61,7 @@ class XMindParser:
             channel=basic_info.get("channel"),
             partner=basic_info.get("partner"),
             designer=basic_info.get("designer"),
-            test_points=filtered_points,
+            test_points=test_points,
             stats=stats
         )
 

@@ -32,10 +32,16 @@ class LibreOfficeDaemon:
         if hasattr(self, '_initialized'):
             return
         self._initialized = True
+        self._daemon_supported = os.name != "nt"
+        if not self._daemon_supported:
+            parser_logger.info("Windows平台不支持LibreOffice守护进程，跳过初始化")
+            return
         self._start_daemon()
     
     def _start_daemon(self):
         """启动LibreOffice守护进程"""
+        if not getattr(self, "_daemon_supported", True):
+            return
         if self._process and self._process.poll() is None:
             # 进程还在运行
             return
@@ -65,13 +71,14 @@ class LibreOfficeDaemon:
                 f"--accept=socket,host={self._host},port={self._port};urp;"
             ]
             
-            self._process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=env,
-                preexec_fn=lambda: os.nice(10) if hasattr(os, 'nice') else None
-            )
+            popen_kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "env": env,
+            }
+            if os.name != "nt":
+                popen_kwargs["preexec_fn"] = lambda: os.nice(10) if hasattr(os, "nice") else None
+            self._process = subprocess.Popen(cmd, **popen_kwargs)
             
             # 等待守护进程启动
             for _ in range(20):  # 最多等待10秒

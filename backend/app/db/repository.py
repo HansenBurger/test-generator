@@ -103,6 +103,23 @@ def update_parse_record(
         return record
 
 
+def update_parse_record_outline_hash(
+    parse_id: str,
+    outline_hash: str,
+    upload_time: Optional[datetime] = None,
+) -> Optional[ParseRecord]:
+    """更新解析记录的哈希（可选更新上传时间）"""
+    with get_session() as session:
+        record = session.query(ParseRecord).filter(ParseRecord.parse_id == parse_id).first()
+        if not record:
+            return None
+        record.outline_hash = outline_hash
+        if upload_time is not None:
+            record.upload_time = upload_time
+        session.flush()
+        return record
+
+
 def get_generation_record(session_id: str) -> Optional[GenerationRecord]:
     with get_session() as session:
         return session.query(GenerationRecord).filter(GenerationRecord.session_id == session_id).first()

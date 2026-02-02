@@ -231,6 +231,14 @@ export const getGenerationStatus = (taskId) => {
 }
 
 /**
+ * 通过 session_id 查询生成任务状态
+ * @param {string} sessionId
+ */
+export const getGenerationStatusBySession = (sessionId) => {
+    return api.get(`/generation-status?session_id=${sessionId}`)
+}
+
+/**
  * 重新生成
  * @param {string} taskId
  * @param {string} strategy

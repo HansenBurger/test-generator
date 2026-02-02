@@ -164,7 +164,6 @@
       </template>
       <el-progress :percentage="Math.round((generationStatus?.progress || 0) * 100)" />
       <div class="progress-meta">
-        <div>任务ID：{{ generationTaskId }}</div>
         <div v-if="currentSessionId">SessionID：{{ currentSessionId }}</div>
         <div>已完成：{{ generationStatus?.completed || 0 }} / {{ generationStatus?.total || 0 }}</div>
         <div>Token消耗：{{ generationStatus?.token_usage || 0 }}</div>
@@ -244,6 +243,7 @@ import {
   confirmPreview,
   bulkGenerate,
   getGenerationStatus,
+  getGenerationStatusBySession,
   exportCases,
   exportCasesBySession,
   exportCasesBySessionWithHeaders
@@ -366,7 +366,9 @@ const startPolling = async (taskId) => {
   stopPolling()
   const poll = async () => {
     try {
-      const status = await getGenerationStatus(taskId)
+      const status = currentSessionId.value
+        ? await getGenerationStatusBySession(currentSessionId.value)
+        : await getGenerationStatus(taskId)
       generationStatus.value = status
       if (status.session_id) {
         currentSessionId.value = status.session_id

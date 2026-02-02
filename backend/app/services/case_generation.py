@@ -4,6 +4,8 @@
 import json
 import os
 import threading
+import os as _os
+from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,7 +21,11 @@ from app.utils.storage import get_generation_dir, save_json
 
 PROMPT_VERSION = "v1"
 BATCH_SIZE = 80
-ENABLE_BATCH = False
+# 批量生成（一次请求多条用例）默认仅用于“规则”类测试点
+ENABLE_PROCESS_BATCH = False
+ENABLE_RULE_BATCH = (_os.getenv("ENABLE_RULE_BATCH", "1") == "1")
+RULE_BATCH_SIZE = 50
+RULE_BATCH_CONCURRENCY = int(_os.getenv("RULE_BATCH_CONCURRENCY", "3") or 3)
 
 SYSTEM_PROMPT_METADATA = """你是一个银行信贷业务测试专家，需要分析测试点文本，补充缺失的正例反例标志和优先级标志。
 
@@ -74,7 +80,7 @@ SYSTEM_PROMPT_CASE_BATCH = """你是银行信贷项目测试专家，需要根�
 - text
 - flow_steps: 相关流程步骤（数组，可为空，仅用于规则类测试点）
 
-输出：JSON数组（顺序与输入一致），每项包含：
+输出：严格 JSON 数组（顺序与输入一致，长度必须与输入一致），每项包含：
 - point_id
 - preconditions: 前提条件数组
 - steps: 测试步骤数组
@@ -83,7 +89,8 @@ SYSTEM_PROMPT_CASE_BATCH = """你是银行信贷项目测试专家，需要根�
 要求：
 1. 每个数组元素为一句话，简洁、可执行
 2. 保持与测试点语义一致，不要引入无关内容
-3. 不要输出多余解释或 Markdown
+3. 不要输出多余解释或 Markdown，不要包含代码块标记
+4. 任何一项如果无法生成，也必须输出对应 point_id，并将三个数组输出为空数组 []
 """
 
 def detect_subtype(text: str) -> Optional[str]:
@@ -219,22 +226,32 @@ class CaseGenerator:
         self,
         points: List[TestPoint],
         strategy: str,
-        flow_steps_map: Optional[Dict[str, List[str]]] = None
+        flow_steps_map: Optional[Dict[str, List[str]]] = None,
+        enable_batch: bool = False
     ) -> Tuple[List[TestCase], int, List[str]]:
-        if not ENABLE_BATCH:
+        if not enable_batch:
             cases: List[TestCase] = []
             logs: List[str] = []
             token_usage = 0
+            failed_ids: List[str] = []
             for point in points:
                 try:
                     case, tokens = self.generate_case(point, strategy)
                     cases.append(case)
                     token_usage += tokens
                 except Exception as exc:
-                    logs.append(f"测试点 {point.point_id} 生成失败：{str(exc)}")
+                    failed_ids.append(point.point_id)
+            if failed_ids:
+                sample = ", ".join(failed_ids[:5])
+                more = "..." if len(failed_ids) > 5 else ""
+                logs.append(f"批次内生成失败 {len(failed_ids)} 条（示例：{sample}{more}）")
             return cases, token_usage, logs
-        temperature = 0.2 if strategy == "standard" else 0.6
-        max_tokens = 1200 if strategy == "standard" else 900
+        # 批量模式更容易出现“输出格式漂移”，这里降温以提升 JSON 稳定性
+        temperature = 0.1
+        # 批量输出 token 需求与条数近似线性相关，这里做一个保守估计并设置上限
+        base = 900 if strategy == "standard" else 700
+        per_item = 70 if strategy == "standard" else 55
+        max_tokens = min(6000, base + len(points) * per_item)
         payload = []
         for point in points:
             flow_steps = []
@@ -258,55 +275,43 @@ class CaseGenerator:
                 max_tokens=max_tokens
             )
         except Exception as exc:
-            logs: List[str] = [f"批量生成解析失败，降级单点生成：{str(exc)}"]
-            cases: List[TestCase] = []
-            token_usage = 0
-            for point in points:
-                single_payload = [{
-                    "point_id": point.point_id,
-                    "point_type": point.point_type,
-                    "subtype": point.subtype,
-                    "priority": point.priority,
-                    "text": point.text,
-                    "flow_steps": flow_steps_map.get(_normalize_context_key(point.context), [])
-                    if point.point_type == "rule" and flow_steps_map else []
-                }]
-                try:
-                    single_result, single_tokens = self._client.chat_json(
-                        system_prompt=SYSTEM_PROMPT_CASE_BATCH,
-                        user_prompt=json.dumps(single_payload, ensure_ascii=False),
-                        temperature=temperature,
-                        max_tokens=max_tokens
-                    )
-                    token_usage += single_tokens
-                    if isinstance(single_result, list) and single_result:
-                        item = single_result[0]
-                        case = TestCase(
-                            case_id=_build_case_id(),
-                            point_id=point.point_id,
-                            point_type=point.point_type,
-                            subtype=point.subtype,
-                            priority=point.priority,
-                            text=point.text,
-                            preconditions=_normalize_list(item.get("preconditions")),
-                            steps=_normalize_list(item.get("steps")),
-                            expected_results=_normalize_list(item.get("expected_results"))
-                        )
-                        cases.append(case)
-                    else:
-                        logs.append(f"测试点 {point.point_id} 生成结果缺失")
-                except Exception as inner_exc:
-                    logs.append(f"测试点 {point.point_id} 生成失败：{str(inner_exc)}")
-            return cases, token_usage, logs
+            # 批量失败的根因通常是模型输出 JSON 不合法（缺逗号/括号/截断等）
+            # 先“拆批重试”（更符合你的预期：分段异步），实在不行再降级单点
+            logs = [f"批量生成解析失败，拆分重试：{str(exc)}"]
+            if len(points) > 1:
+                mid = len(points) // 2
+                left = points[:mid]
+                right = points[mid:]
+                left_cases, left_tokens, left_logs = self.generate_cases_batch(
+                    left,
+                    strategy,
+                    flow_steps_map=flow_steps_map,
+                    enable_batch=True
+                )
+                right_cases, right_tokens, right_logs = self.generate_cases_batch(
+                    right,
+                    strategy,
+                    flow_steps_map=flow_steps_map,
+                    enable_batch=True
+                )
+                return left_cases + right_cases, left_tokens + right_tokens, logs + left_logs + right_logs
+
+            # 只有 1 条仍失败：改用单点 prompt 生成（更稳）
+            try:
+                case, single_tokens = self.generate_case(points[0], strategy)
+                return [case], single_tokens, logs + ["单点降级成功"]
+            except Exception as inner_exc:
+                return [], 0, logs + [f"单点降级仍失败：{str(inner_exc)}"]
         cases: List[TestCase] = []
         if not isinstance(result, list):
             logs.append("批量生成返回格式异常，非数组")
             return cases, tokens, logs
         result_map = {str(item.get("point_id")): item for item in result if isinstance(item, dict)}
+        missing_ids: List[str] = []
         for point in points:
             item = result_map.get(point.point_id)
             if not item:
-                logs.append(f"测试点 {point.point_id} 生成结果缺失")
+                missing_ids.append(point.point_id)
                 continue
             case = TestCase(
                 case_id=_build_case_id(),
@@ -320,6 +325,10 @@ class CaseGenerator:
                 expected_results=_normalize_list(item.get("expected_results"))
             )
             cases.append(case)
+        if missing_ids:
+            sample = ", ".join(missing_ids[:5])
+            more = "..." if len(missing_ids) > 5 else ""
+            logs.append(f"批量生成结果缺失 {len(missing_ids)} 条（示例：{sample}{more}）")
         return cases, tokens, logs
 
 
@@ -412,8 +421,13 @@ class CaseGenerationManager:
         if not parsed:
             raise ValueError("解析结果不存在，请先上传并解析XMind")
 
-        token_usage, logs = self._generator.fill_missing_metadata(parsed.test_points)
-        selected_points = select_preview_points(parsed.test_points, count)
+        # 预生成属于“生成”范畴：跳过 priority=3 的测试点
+        generatable_points = [p for p in parsed.test_points if p.priority != 3]
+        if not generatable_points:
+            raise ValueError("无可生成的测试点（均为低优先级 priority=3）")
+
+        token_usage, logs = self._generator.fill_missing_metadata(generatable_points)
+        selected_points = select_preview_points(generatable_points, count)
 
         cases: List[TestCase] = []
         for point in selected_points:
@@ -441,7 +455,10 @@ class CaseGenerationManager:
             raise ValueError("解析结果不存在，请重新上传")
 
         preview_point_ids = set(preview.get("point_ids", []))
-        remaining_points = [p for p in parsed.test_points if p.point_id not in preview_point_ids]
+        remaining_points = [
+            p for p in parsed.test_points
+            if p.point_id not in preview_point_ids and p.priority != 3
+        ]
         task_id, session_id = self.create_generation_task(
             requirement_name=parsed.requirement_name,
             parse_id=parse_id,
@@ -464,10 +481,11 @@ class CaseGenerationManager:
         parsed = self.get_parsed_doc(parse_id)
         if not parsed:
             raise ValueError("解析结果不存在，请先上传并解析XMind")
+        points = [p for p in parsed.test_points if p.priority != 3]
         return self.create_generation_task(
             requirement_name=parsed.requirement_name,
             parse_id=parse_id,
-            points=parsed.test_points,
+            points=points,
             strategy=strategy,
             initial_cases=[],
             session_id=session_id,
@@ -501,6 +519,9 @@ class CaseGenerationManager:
         )
         if initial_cases:
             task.cases.extend(initial_cases)
+            task.completed = len(initial_cases)
+            task.total = len(points) + len(initial_cases)
+            task.progress = (task.completed / max(1, task.total))
 
         with self._lock:
             self._tasks[task_id] = task
@@ -522,6 +543,15 @@ class CaseGenerationManager:
         with self._lock:
             return self._tasks.get(task_id)
 
+    def get_task_by_session(self, session_id: str) -> Optional[GenerationTask]:
+        if not session_id:
+            return None
+        with self._lock:
+            for task in self._tasks.values():
+                if task.session_id == session_id:
+                    return task
+        return None
+
     def _run_task(self, task_id: str):
         task = self.get_task(task_id)
         if not task:
@@ -533,25 +563,38 @@ class CaseGenerationManager:
             repository.update_generation_record(task.session_id, status="processing")
 
         try:
+            # 预处理：补全元数据
+            missing_count = len([p for p in task.points if not (p.subtype and p.priority)])
+            task.logs.append(f"阶段：预处理（元数据补全），待补全 {missing_count} 条")
             token_usage, logs = self._generator.fill_missing_metadata(task.points)
             task.token_usage += token_usage
             task.logs.extend(logs)
+            task.logs.append("阶段：预处理完成")
 
             point_map = {p.point_id: p for p in task.points}
             process_points = [p for p in task.points if p.point_type == "process"]
             rule_points = [p for p in task.points if p.point_type == "rule"]
 
-            processed_count = 0
             flow_steps_map: Dict[str, List[str]] = {}
 
-            for batch in _chunk_list(process_points, BATCH_SIZE):
-                cases, tokens, batch_logs = self._generator.generate_cases_batch(batch, task.strategy)
+            if process_points:
+                process_batches = _chunk_list(process_points, BATCH_SIZE)
+                task.logs.append(f"阶段：流程用例生成，共 {len(process_points)} 条，批次数 {len(process_batches)}")
+            else:
+                process_batches = []
+                task.logs.append("阶段：流程用例生成，0 条（跳过）")
+
+            for idx, batch in enumerate(process_batches, start=1):
+                cases, tokens, batch_logs = self._generator.generate_cases_batch(
+                    batch,
+                    task.strategy,
+                    enable_batch=ENABLE_PROCESS_BATCH
+                )
                 task.token_usage += tokens
                 task.logs.extend(batch_logs)
                 for case in cases:
                     task.cases.append(case)
                     task.completed += 1
-                    task.logs.append(f"测试点 {case.point_id} 生成完成")
                     point = point_map.get(case.point_id)
                     if point:
                         key = _normalize_context_key(point.context)
@@ -559,26 +602,68 @@ class CaseGenerationManager:
                 failed_in_batch = len(batch) - len(cases)
                 if failed_in_batch > 0:
                     task.failed += failed_in_batch
-                processed_count += len(batch)
-                task.progress = processed_count / max(1, task.total)
-
-            for batch in _chunk_list(rule_points, BATCH_SIZE):
-                cases, tokens, batch_logs = self._generator.generate_cases_batch(
-                    batch,
-                    task.strategy,
-                    flow_steps_map=flow_steps_map
+                task.progress = (task.completed + task.failed) / max(1, task.total)
+                task.logs.append(
+                    f"流程批 {idx}/{len(process_batches)} 完成：成功 {len(cases)}，失败 {failed_in_batch}，进度 {task.completed}/{task.total}"
                 )
-                task.token_usage += tokens
-                task.logs.extend(batch_logs)
-                for case in cases:
-                    task.cases.append(case)
-                    task.completed += 1
-                    task.logs.append(f"测试点 {case.point_id} 生成完成")
-                failed_in_batch = len(batch) - len(cases)
-                if failed_in_batch > 0:
-                    task.failed += failed_in_batch
-                processed_count += len(batch)
-                task.progress = processed_count / max(1, task.total)
+
+            # 规则批次：按每 50 条分段，可并发请求，谁先返回谁先入库（不影响 JSON 格式）
+            if rule_points:
+                rule_batches = _chunk_list(rule_points, RULE_BATCH_SIZE if ENABLE_RULE_BATCH else BATCH_SIZE)
+                task.logs.append(f"阶段：规则用例生成，共 {len(rule_points)} 条，批次数 {len(rule_batches)}")
+            else:
+                rule_batches = []
+                task.logs.append("阶段：规则用例生成，0 条（跳过）")
+
+            if ENABLE_RULE_BATCH and rule_batches:
+                concurrency = max(1, min(RULE_BATCH_CONCURRENCY, len(rule_batches)))
+                task.logs.append(f"规则批量请求：已启用，每批 {RULE_BATCH_SIZE}，并发 {concurrency}")
+                with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="rule_batch") as pool:
+                    futures = {
+                        pool.submit(
+                            self._generator.generate_cases_batch,
+                            batch,
+                            task.strategy,
+                            flow_steps_map,
+                            True
+                        ): (i, batch)
+                        for i, batch in enumerate(rule_batches, start=1)
+                    }
+                    for future in as_completed(futures):
+                        idx, batch = futures[future]
+                        cases, tokens, batch_logs = future.result()
+                        task.token_usage += tokens
+                        task.logs.extend(batch_logs)
+                        for case in cases:
+                            task.cases.append(case)
+                            task.completed += 1
+                        failed_in_batch = len(batch) - len(cases)
+                        if failed_in_batch > 0:
+                            task.failed += failed_in_batch
+                        task.progress = (task.completed + task.failed) / max(1, task.total)
+                        task.logs.append(
+                            f"规则批 {idx}/{len(rule_batches)} 完成：成功 {len(cases)}，失败 {failed_in_batch}，进度 {task.completed}/{task.total}"
+                        )
+            else:
+                for idx, batch in enumerate(rule_batches, start=1):
+                    cases, tokens, batch_logs = self._generator.generate_cases_batch(
+                        batch,
+                        task.strategy,
+                        flow_steps_map=flow_steps_map,
+                        enable_batch=False
+                    )
+                    task.token_usage += tokens
+                    task.logs.extend(batch_logs)
+                    for case in cases:
+                        task.cases.append(case)
+                        task.completed += 1
+                    failed_in_batch = len(batch) - len(cases)
+                    if failed_in_batch > 0:
+                        task.failed += failed_in_batch
+                    task.progress = (task.completed + task.failed) / max(1, task.total)
+                    task.logs.append(
+                        f"规则批 {idx}/{len(rule_batches)} 完成：成功 {len(cases)}，失败 {failed_in_batch}，进度 {task.completed}/{task.total}"
+                    )
 
             task.status = "completed"
             task.completed_at = datetime.now()
