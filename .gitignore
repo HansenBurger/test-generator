@@ -36,6 +36,9 @@ tmp/
 *.json
 !package.json
 !package-lock.json
+tools/
+backend/data/
+*.db
 
 # Logs
 *.log
