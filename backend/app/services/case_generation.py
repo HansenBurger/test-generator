@@ -14,12 +14,18 @@ from uuid import uuid4
 
 from app.models.schemas import ParsedXmindDocument, TestPoint, TestCase
 from app.services.ai_client import AIClient
+from app.services.prompts import (
+    PROMPT_VERSION,
+    SYSTEM_PROMPT_METADATA,
+    SYSTEM_PROMPT_METADATA_BATCH,
+    get_case_prompt,
+    get_case_batch_prompt
+)
 from app.db import repository
 from app.utils.logger import generator_logger
 from app.utils.storage import get_generation_dir, save_json
 
 
-PROMPT_VERSION = "v1"
 BATCH_SIZE = 80
 # 批量生成（一次请求多条用例）默认仅用于“规则”类测试点
 ENABLE_PROCESS_BATCH = False
@@ -29,71 +35,6 @@ RULE_BATCH_CONCURRENCY = int(_os.getenv("RULE_BATCH_CONCURRENCY", "3") or 3)
 METADATA_BATCH_SIZE = 10
 METADATA_BATCH_CONCURRENCY = int(_os.getenv("METADATA_BATCH_CONCURRENCY", "3") or 3)
 
-SYSTEM_PROMPT_METADATA = """你是一个银行信贷业务测试专家，需要分析测试点文本，补充缺失的正例反例标志和优先级标志。
-
-输入：测试点文本
-输出：JSON格式，包含：
-- subtype: "positive"或"negative"
-- priority: 1、2、3（1=高，2=中，3=低）
-
-判断规则：
-1. 正例判断关键词：
-   - 正例："通过"、"成功"、"正确"、"一致"、"正常"
-   - 反例："不通过"、"失败"、"错误"、"不一致"、"异常"、"提示"
-2. 优先级判断：
-   - 高优先级（1）：核心业务流程、关键检查规则、主要处理规则
-   - 中优先级（2）：普通业务规则、重要但不是关键
-   - 低优先级（3）：辅助性规则、边界条件
-3. 如果文本中同时出现正反例关键词，以最终结果为准
-"""
-
-SYSTEM_PROMPT_METADATA_BATCH = """你是一个银行信贷业务测试专家，需要分析测试点文本，补充缺失的正例反例标志和优先级标志。
-
-输入：JSON数组，每项包含：
-- point_id: 测试点ID
-- text: 测试点文本
-
-输出：JSON数组（顺序与输入一致），每项包含：
-- point_id
-- subtype: "positive"或"negative"
-- priority: 1、2、3（1=高，2=中，3=低）
-"""
-
-SYSTEM_PROMPT_CASE = """你是银行信贷项目测试专家，需要根据测试点生成可执行的测试用例。
-
-输出 JSON，字段如下：
-- preconditions: 前提条件数组
-- steps: 测试步骤数组
-- expected_results: 预期结果数组
-
-要求：
-1. 每个数组元素为一句话，简洁、可执行
-2. 保持与测试点语义一致，不要引入无关内容
-3. 不要输出多余解释或 Markdown
-"""
-
-SYSTEM_PROMPT_CASE_BATCH = """你是银行信贷项目测试专家，需要根据测试点生成可执行的测试用例。
-
-输入：JSON数组，每项包含：
-- point_id
-- point_type
-- subtype
-- priority
-- text
-- flow_steps: 相关流程步骤（数组，可为空，仅用于规则类测试点）
-
-输出：严格 JSON 数组（顺序与输入一致，长度必须与输入一致），每项包含：
-- point_id
-- preconditions: 前提条件数组
-- steps: 测试步骤数组
-- expected_results: 预期结果数组
-
-要求：
-1. 每个数组元素为一句话，简洁、可执行
-2. 保持与测试点语义一致，不要引入无关内容
-3. 不要输出多余解释或 Markdown，不要包含代码块标记
-4. 任何一项如果无法生成，也必须输出对应 point_id，并将三个数组输出为空数组 []
-"""
 
 def detect_subtype(text: str) -> Optional[str]:
     positive_keywords = ["通过", "成功", "正确", "一致", "正常"]
@@ -165,6 +106,43 @@ def _build_user_prompt(point: TestPoint) -> str:
         "text": point.text
     }, ensure_ascii=False)
 
+
+def _build_case_example(case: TestCase, for_batch: bool, include_flow_steps: bool) -> str:
+    input_payload = {
+        "point_id": case.point_id,
+        "point_type": case.point_type,
+        "subtype": case.subtype,
+        "priority": case.priority,
+        "text": case.text
+    }
+    if include_flow_steps:
+        input_payload["flow_steps"] = case.steps or []
+    output_payload = {
+        "preconditions": case.preconditions or [],
+        "steps": case.steps or [],
+        "expected_results": case.expected_results or []
+    }
+    if for_batch:
+        input_text = json.dumps([input_payload], ensure_ascii=False, indent=2)
+        output_text = json.dumps([{"point_id": case.point_id, **output_payload}], ensure_ascii=False, indent=2)
+    else:
+        input_text = json.dumps(input_payload, ensure_ascii=False, indent=2)
+        output_text = json.dumps(output_payload, ensure_ascii=False, indent=2)
+    return f"示例：\n输入：{input_text}\n输出：{output_text}"
+
+
+def _build_prompt_examples(cases: List[TestCase]) -> Dict[str, str]:
+    examples: Dict[str, str] = {}
+    process_case = next((case for case in cases if case.point_type == "process"), None)
+    rule_case = next((case for case in cases if case.point_type == "rule"), None)
+    if process_case:
+        examples["process"] = _build_case_example(process_case, for_batch=False, include_flow_steps=False)
+        examples["process_batch"] = _build_case_example(process_case, for_batch=True, include_flow_steps=False)
+    if rule_case:
+        examples["rule"] = _build_case_example(rule_case, for_batch=False, include_flow_steps=False)
+        examples["rule_batch"] = _build_case_example(rule_case, for_batch=True, include_flow_steps=True)
+    return examples
+
 def _normalize_context_key(context: Optional[str]) -> str:
     value = context or ""
     return value.replace("业务规则", "业务流程").strip()
@@ -181,6 +159,20 @@ class CaseGenerator:
 
     def __init__(self):
         self._client = AIClient()
+
+    def _resolve_case_prompt(
+        self,
+        point_type: str,
+        strategy: str,
+        prompt_examples: Optional[Dict[str, str]] = None,
+        for_batch: bool = False
+    ) -> str:
+        normalized = "process" if point_type == "process" else "rule"
+        example_key = f"{normalized}_batch" if for_batch else normalized
+        example = prompt_examples.get(example_key, "") if prompt_examples else ""
+        if for_batch:
+            return get_case_batch_prompt(normalized, strategy, example)
+        return get_case_prompt(normalized, strategy, example)
 
     def _request_metadata_batch(
         self,
@@ -271,11 +263,16 @@ class CaseGenerator:
                     point.priority = point.priority or meta.get("priority")
         return token_usage, logs
 
-    def generate_case(self, point: TestPoint, strategy: str = "standard") -> Tuple[TestCase, int]:
+    def generate_case(
+        self,
+        point: TestPoint,
+        strategy: str = "standard",
+        prompt_examples: Optional[Dict[str, str]] = None
+    ) -> Tuple[TestCase, int]:
         temperature = 0.2 if strategy == "standard" else 0.6
         max_tokens = 900 if strategy == "standard" else 600
         result, tokens = self._client.chat_json(
-            system_prompt=SYSTEM_PROMPT_CASE,
+            system_prompt=self._resolve_case_prompt(point.point_type, strategy, prompt_examples, for_batch=False),
             user_prompt=_build_user_prompt(point),
             temperature=temperature,
             max_tokens=max_tokens
@@ -298,7 +295,8 @@ class CaseGenerator:
         points: List[TestPoint],
         strategy: str,
         flow_steps_map: Optional[Dict[str, List[str]]] = None,
-        enable_batch: bool = False
+        enable_batch: bool = False,
+        prompt_examples: Optional[Dict[str, str]] = None
     ) -> Tuple[List[TestCase], int, List[str]]:
         if not enable_batch:
             cases: List[TestCase] = []
@@ -307,7 +305,7 @@ class CaseGenerator:
             failed_ids: List[str] = []
             for point in points:
                 try:
-                    case, tokens = self.generate_case(point, strategy)
+                    case, tokens = self.generate_case(point, strategy, prompt_examples=prompt_examples)
                     cases.append(case)
                     token_usage += tokens
                 except Exception as exc:
@@ -340,7 +338,12 @@ class CaseGenerator:
         logs: List[str] = []
         try:
             result, tokens = self._client.chat_json(
-                system_prompt=SYSTEM_PROMPT_CASE_BATCH,
+                system_prompt=self._resolve_case_prompt(
+                    points[0].point_type if points else "process",
+                    strategy,
+                    prompt_examples,
+                    for_batch=True
+                ),
                 user_prompt=json.dumps(payload, ensure_ascii=False),
                 temperature=temperature,
                 max_tokens=max_tokens
@@ -357,19 +360,21 @@ class CaseGenerator:
                     left,
                     strategy,
                     flow_steps_map=flow_steps_map,
-                    enable_batch=True
+                    enable_batch=True,
+                    prompt_examples=prompt_examples
                 )
                 right_cases, right_tokens, right_logs = self.generate_cases_batch(
                     right,
                     strategy,
                     flow_steps_map=flow_steps_map,
-                    enable_batch=True
+                    enable_batch=True,
+                    prompt_examples=prompt_examples
                 )
                 return left_cases + right_cases, left_tokens + right_tokens, logs + left_logs + right_logs
 
             # 只有 1 条仍失败：改用单点 prompt 生成（更稳）
             try:
-                case, single_tokens = self.generate_case(points[0], strategy)
+                case, single_tokens = self.generate_case(points[0], strategy, prompt_examples=prompt_examples)
                 return [case], single_tokens, logs + ["单点降级成功"]
             except Exception as inner_exc:
                 return [], 0, logs + [f"单点降级仍失败：{str(inner_exc)}"]
@@ -412,6 +417,7 @@ class GenerationTask:
     session_id: Optional[str] = None
     prompt_version: Optional[str] = None
     generation_mode: Optional[str] = None
+    prompt_examples: Dict[str, str] = field(default_factory=dict)
     points: List[TestPoint] = field(default_factory=list)
     status: str = "pending"
     progress: float = 0.0
@@ -577,6 +583,9 @@ class CaseGenerationManager:
     ) -> Tuple[str, str]:
         task_id = uuid4().hex
         session_id = session_id or uuid4().hex
+        prompt_examples: Dict[str, str] = {}
+        if generation_mode == "preview" and initial_cases:
+            prompt_examples = _build_prompt_examples(initial_cases)
         task = GenerationTask(
             task_id=task_id,
             requirement_name=requirement_name,
@@ -585,6 +594,7 @@ class CaseGenerationManager:
             strategy=strategy,
             prompt_version=prompt_version or PROMPT_VERSION,
             generation_mode=generation_mode,
+            prompt_examples=prompt_examples,
             points=points,
             total=len(points)
         )
@@ -661,7 +671,8 @@ class CaseGenerationManager:
                 cases, tokens, batch_logs = self._generator.generate_cases_batch(
                     batch,
                     task.strategy,
-                    enable_batch=ENABLE_PROCESS_BATCH
+                    enable_batch=ENABLE_PROCESS_BATCH,
+                    prompt_examples=task.prompt_examples
                 )
                 task.token_usage += tokens
                 task.logs.extend(batch_logs)
@@ -698,7 +709,8 @@ class CaseGenerationManager:
                             batch,
                             task.strategy,
                             flow_steps_map,
-                            True
+                            True,
+                            task.prompt_examples
                         ): (i, batch)
                         for i, batch in enumerate(rule_batches, start=1)
                     }
@@ -723,7 +735,8 @@ class CaseGenerationManager:
                         batch,
                         task.strategy,
                         flow_steps_map=flow_steps_map,
-                        enable_batch=False
+                        enable_batch=False,
+                        prompt_examples=task.prompt_examples
                     )
                     task.token_usage += tokens
                     task.logs.extend(batch_logs)
