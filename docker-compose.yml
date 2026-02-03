@@ -11,6 +11,7 @@ services:
       - backend_data:/app/uploads
     environment:
       - PYTHONUNBUFFERED=1
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
     restart: unless-stopped
     networks:
       - test-generator-network

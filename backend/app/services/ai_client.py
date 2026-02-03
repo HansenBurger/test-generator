@@ -4,6 +4,7 @@
 import json
 import os
 import re
+import subprocess
 from typing import Any, Tuple
 
 from openai import OpenAI
@@ -15,8 +16,19 @@ class AIClient:
 
     def __init__(self):
         api_key = os.getenv("DASHSCOPE_API_KEY")
+        source = "process"
+        if not api_key and os.name == "nt":
+            api_key = self._read_windows_env("DASHSCOPE_API_KEY")
+            source = "windows"
         if not api_key:
             raise ValueError("缺少 DASHSCOPE_API_KEY 环境变量（请在运行环境中配置）")
+        masked = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) >= 8 else "***"
+        generator_logger.info(
+            "DASHSCOPE_API_KEY loaded from %s (length=%s, masked=%s)",
+            source,
+            len(api_key),
+            masked,
+        )
         self._client = OpenAI(
             api_key=api_key,
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -56,6 +68,43 @@ class AIClient:
         usage = getattr(response, "usage", None)
         total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
         return json_data, total_tokens
+
+    def _read_windows_env(self, name: str) -> str:
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[Environment]::GetEnvironmentVariable($args[0], 'User')",
+                    name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            value = (result.stdout or "").strip()
+            if value:
+                return value
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[Environment]::GetEnvironmentVariable($args[0], 'Machine')",
+                    name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return (result.stdout or "").strip()
+        except Exception:
+            return ""
 
     def _extract_json(self, content: str) -> Any:
         content = content.strip()
