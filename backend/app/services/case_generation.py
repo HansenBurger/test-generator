@@ -24,8 +24,10 @@ BATCH_SIZE = 80
 # 批量生成（一次请求多条用例）默认仅用于“规则”类测试点
 ENABLE_PROCESS_BATCH = False
 ENABLE_RULE_BATCH = (_os.getenv("ENABLE_RULE_BATCH", "1") == "1")
-RULE_BATCH_SIZE = 50
+RULE_BATCH_SIZE = 20
 RULE_BATCH_CONCURRENCY = int(_os.getenv("RULE_BATCH_CONCURRENCY", "3") or 3)
+METADATA_BATCH_SIZE = 10
+METADATA_BATCH_CONCURRENCY = int(_os.getenv("METADATA_BATCH_CONCURRENCY", "3") or 3)
 
 SYSTEM_PROMPT_METADATA = """你是一个银行信贷业务测试专家，需要分析测试点文本，补充缺失的正例反例标志和优先级标志。
 
@@ -96,19 +98,27 @@ SYSTEM_PROMPT_CASE_BATCH = """你是银行信贷项目测试专家，需要根�
 def detect_subtype(text: str) -> Optional[str]:
     positive_keywords = ["通过", "成功", "正确", "一致", "正常"]
     negative_keywords = ["不通过", "失败", "错误", "不一致", "异常", "提示"]
-    last_pos = -1
-    subtype = None
-    for word in positive_keywords:
-        idx = text.rfind(word)
-        if idx > last_pos:
-            last_pos = idx
-            subtype = "positive"
-    for word in negative_keywords:
-        idx = text.rfind(word)
-        if idx > last_pos:
-            last_pos = idx
-            subtype = "negative"
-    return subtype
+
+    has_positive = any(word in text for word in positive_keywords)
+    has_negative = any(word in text for word in negative_keywords)
+
+    if has_positive and has_negative:
+        return None
+    if has_negative:
+        return "negative"
+    if has_positive:
+        return "positive"
+    return None
+
+
+def _has_subtype_conflict(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    positive_keywords = ["通过", "成功", "正确", "一致", "正常"]
+    negative_keywords = ["不通过", "失败", "错误", "不一致", "异常", "提示"]
+    has_positive = any(word in text for word in positive_keywords)
+    has_negative = any(word in text for word in negative_keywords)
+    return has_positive and has_negative
 
 
 def select_preview_points(points: List[TestPoint], count: Optional[int]) -> List[TestPoint]:
@@ -172,32 +182,93 @@ class CaseGenerator:
     def __init__(self):
         self._client = AIClient()
 
+    def _request_metadata_batch(
+        self,
+        batch: List[TestPoint],
+        attempt: int = 1
+    ) -> Tuple[Dict[str, dict], int, List[str]]:
+        logs: List[str] = []
+        payload = [{"point_id": p.point_id, "text": p.text} for p in batch]
+        try:
+            result, tokens = self._client.chat_json(
+                system_prompt=SYSTEM_PROMPT_METADATA_BATCH,
+                user_prompt=json.dumps(payload, ensure_ascii=False),
+                temperature=0.1,
+                max_tokens=800
+            )
+            if not isinstance(result, list):
+                raise ValueError("元数据批量补全失败：返回格式非数组")
+            result_map = {
+                str(item.get("point_id")): item
+                for item in result
+                if isinstance(item, dict) and item.get("point_id") is not None
+            }
+            missing_points = [p for p in batch if p.point_id not in result_map]
+            if missing_points and attempt < 2:
+                logs.append(f"元数据批量补全缺失 {len(missing_points)} 条，尝试重试")
+                retry_map, retry_tokens, retry_logs = self._request_metadata_batch(
+                    missing_points,
+                    attempt=attempt + 1
+                )
+                result_map.update(retry_map)
+                tokens += retry_tokens
+                logs.extend(retry_logs)
+            elif missing_points:
+                logs.append(f"元数据批量补全缺失 {len(missing_points)} 条，已达重试上限")
+            return result_map, tokens, logs
+        except Exception as exc:
+            if len(batch) > 1:
+                logs.append(f"元数据批量补全失败，拆分重试：{str(exc)}")
+                mid = len(batch) // 2
+                left_map, left_tokens, left_logs = self._request_metadata_batch(batch[:mid], attempt=attempt + 1)
+                right_map, right_tokens, right_logs = self._request_metadata_batch(batch[mid:], attempt=attempt + 1)
+                logs.extend(left_logs)
+                logs.extend(right_logs)
+                merged = {}
+                merged.update(left_map)
+                merged.update(right_map)
+                return merged, left_tokens + right_tokens, logs
+            if attempt < 2:
+                logs.append(f"元数据单点补全失败，重试一次：{str(exc)}")
+                return self._request_metadata_batch(batch, attempt=attempt + 1)
+            logs.append(f"元数据单点补全失败：{str(exc)}")
+            return {}, 0, logs
+
     def fill_missing_metadata(self, points: List[TestPoint]) -> Tuple[int, List[str]]:
         token_usage = 0
         logs: List[str] = []
         missing = [p for p in points if not (p.subtype and p.priority)]
         if not missing:
             return token_usage, logs
-        for batch in _chunk_list(missing, BATCH_SIZE):
-            payload = [{"point_id": p.point_id, "text": p.text} for p in batch]
-            try:
-                result, tokens = self._client.chat_json(
-                    system_prompt=SYSTEM_PROMPT_METADATA_BATCH,
-                    user_prompt=json.dumps(payload, ensure_ascii=False),
-                    temperature=0.1,
-                    max_tokens=800
-                )
-                token_usage += tokens
-                if isinstance(result, list):
-                    result_map = {str(item.get("point_id")): item for item in result if isinstance(item, dict)}
+        if len(missing) > METADATA_BATCH_SIZE:
+            batches = _chunk_list(missing, METADATA_BATCH_SIZE)
+            concurrency = max(1, min(METADATA_BATCH_CONCURRENCY, len(batches)))
+            logs.append(f"元数据补全：分批 {len(batches)} 组，每批 {METADATA_BATCH_SIZE}，并发 {concurrency}")
+            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="metadata_batch") as pool:
+                futures = {
+                    pool.submit(self._request_metadata_batch, batch): batch
+                    for batch in batches
+                }
+                for future in as_completed(futures):
+                    batch = futures[future]
+                    result_map, tokens, batch_logs = future.result()
+                    token_usage += tokens
+                    logs.extend(batch_logs)
                     for point in batch:
-                        meta = result_map.get(point.point_id, {})
+                        meta = result_map.get(point.point_id)
+                        if not meta:
+                            continue
                         point.subtype = point.subtype or meta.get("subtype")
                         point.priority = point.priority or meta.get("priority")
-                else:
-                    logs.append("元数据批量补全失败：返回格式非数组")
-            except Exception as exc:
-                logs.append(f"元数据批量补全失败：{str(exc)}")
+        else:
+            for batch in _chunk_list(missing, METADATA_BATCH_SIZE):
+                result_map, tokens, batch_logs = self._request_metadata_batch(batch)
+                token_usage += tokens
+                logs.extend(batch_logs)
+                for point in batch:
+                    meta = result_map.get(point.point_id, {})
+                    point.subtype = point.subtype or meta.get("subtype")
+                    point.priority = point.priority or meta.get("priority")
         return token_usage, logs
 
     def generate_case(self, point: TestPoint, strategy: str = "standard") -> Tuple[TestCase, int]:
@@ -564,8 +635,10 @@ class CaseGenerationManager:
 
         try:
             # 预处理：补全元数据
+            conflict_count = sum(1 for p in task.points if _has_subtype_conflict(p.text))
             missing_count = len([p for p in task.points if not (p.subtype and p.priority)])
             task.logs.append(f"阶段：预处理（元数据补全），待补全 {missing_count} 条")
+            task.logs.append(f"正反例关键词冲突：{conflict_count} 条")
             token_usage, logs = self._generator.fill_missing_metadata(task.points)
             task.token_usage += token_usage
             task.logs.extend(logs)
@@ -607,7 +680,7 @@ class CaseGenerationManager:
                     f"流程批 {idx}/{len(process_batches)} 完成：成功 {len(cases)}，失败 {failed_in_batch}，进度 {task.completed}/{task.total}"
                 )
 
-            # 规则批次：按每 50 条分段，可并发请求，谁先返回谁先入库（不影响 JSON 格式）
+            # 规则批次：按每 20 条分段，可并发请求，谁先返回谁先入库（不影响 JSON 格式）
             if rule_points:
                 rule_batches = _chunk_list(rule_points, RULE_BATCH_SIZE if ENABLE_RULE_BATCH else BATCH_SIZE)
                 task.logs.append(f"阶段：规则用例生成，共 {len(rule_points)} 条，批次数 {len(rule_batches)}")

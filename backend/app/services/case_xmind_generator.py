@@ -291,9 +291,11 @@ class CaseXMindGenerator:
         pre_content = self._create_child_topic(case_topic, self._join_with_index(case.preconditions))
         steps_content = self._create_child_topic(pre_content, self._join_with_index(case.steps))
         expected_text = self._join_with_index(case.expected_results)
-        if point.subtype == "negative" and expected_text:
-            expected_text = f"❌{expected_text}"
-        self._create_child_topic(steps_content, expected_text)
+        marker_id = None
+        subtype = case.subtype or point.subtype
+        if subtype == "negative" and expected_text:
+            marker_id = "symbol-wrong"
+        self._create_child_topic(steps_content, expected_text, marker_id=marker_id)
         self._attached_case_ids.add(case.case_id)
         return True
 
@@ -336,9 +338,15 @@ class CaseXMindGenerator:
             topics = ET.SubElement(children, "topics", {"type": "attached"})
         return topics
 
-    def _create_child_topic(self, parent: ET.Element, title_text: str, priority: Optional[int] = None) -> ET.Element:
+    def _create_child_topic(
+        self,
+        parent: ET.Element,
+        title_text: str,
+        priority: Optional[int] = None,
+        marker_id: Optional[str] = None
+    ) -> ET.Element:
         topics = self._ensure_child_topics(parent)
-        return self._create_topic(topics, title_text, priority)
+        return self._create_topic(topics, title_text, priority, marker_id=marker_id)
 
     def _contains_sequence(self, path: List[str], target: List[str]) -> bool:
         if not target:
@@ -383,14 +391,26 @@ class CaseXMindGenerator:
             return segments[1:]
         return segments
 
-    def _create_topic(self, parent, title_text: str, priority: Optional[int] = None) -> ET.Element:
+    def _create_topic(
+        self,
+        parent,
+        title_text: str,
+        priority: Optional[int] = None,
+        marker_id: Optional[str] = None
+    ) -> ET.Element:
         import uuid
         topic_elem = ET.SubElement(parent, "topic", {"id": uuid.uuid4().hex[:26]})
         title = ET.SubElement(topic_elem, "title")
         title.text = title_text or ""
+        marker_ids = []
         if priority in (1, 2, 3):
+            marker_ids.append(f"priority-{priority}")
+        if marker_id:
+            marker_ids.append(marker_id)
+        if marker_ids:
             marker_refs = ET.SubElement(topic_elem, "marker-refs")
-            ET.SubElement(marker_refs, "marker-ref", {"marker-id": f"priority-{priority}"})
+            for mid in marker_ids:
+                ET.SubElement(marker_refs, "marker-ref", {"marker-id": mid})
         return topic_elem
 
     def _create_meta_xml(self) -> str:

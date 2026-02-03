@@ -1,7 +1,7 @@
 <template>
   <el-container class="app-container">
     <el-header class="app-header">
-      <h1>测试大纲生成器</h1>
+      <h1>测试大纲与用例生成器</h1>
     </el-header>
     <el-main>
       <router-view />

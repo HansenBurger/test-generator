@@ -223,21 +223,16 @@ class XMindParser:
     def _detect_subtype(self, text: str) -> Optional[str]:
         positive_keywords = ["通过", "成功", "正确", "一致", "正常"]
         negative_keywords = ["不通过", "失败", "错误", "不一致", "异常", "提示"]
+        has_positive = any(word in text for word in positive_keywords)
+        has_negative = any(word in text for word in negative_keywords)
 
-        last_pos = -1
-        subtype = None
-        for word in positive_keywords:
-            idx = text.rfind(word)
-            if idx > last_pos:
-                last_pos = idx
-                subtype = "positive"
-        for word in negative_keywords:
-            idx = text.rfind(word)
-            if idx > last_pos:
-                last_pos = idx
-                subtype = "negative"
-
-        return subtype
+        if has_positive and has_negative:
+            return None
+        if has_negative:
+            return "negative"
+        if has_positive:
+            return "positive"
+        return None
 
     def _build_stats(self, points: List[TestPoint]) -> dict:
         stats = {
