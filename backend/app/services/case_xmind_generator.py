@@ -241,7 +241,7 @@ class CaseXMindGenerator:
         segments = self._strip_root(segments)
         if not segments:
             return False
-        if segments[-1] in ("业务流程", "业务规则"):
+        if segments[-1] in ("业务流程", "业务规则", "页面控制"):
             leaf = segments[-1]
             path = segments[:-1]
         else:
@@ -250,6 +250,8 @@ class CaseXMindGenerator:
         if point.point_type == "process" and leaf != "业务流程":
             return False
         if point.point_type == "rule" and leaf != "业务规则":
+            return False
+        if point.point_type == "page_control" and leaf != "页面控制":
             return False
         if self.parsed.document_type == "modeling":
             if step:
@@ -269,7 +271,12 @@ class CaseXMindGenerator:
         topics = children.find("topics")
         if topics is None:
             return None
-        target = "业务流程" if point_type == "process" else "业务规则"
+        if point_type == "process":
+            target = "业务流程"
+        elif point_type == "page_control":
+            target = "页面控制"
+        else:
+            target = "业务规则"
         for topic in topics.findall("topic"):
             title = topic.find("title")
             if title is not None and title.text == target:
@@ -371,6 +378,8 @@ class CaseXMindGenerator:
         if point_type == "process" and "业务流程" not in text:
             return False
         if point_type == "rule" and "业务规则" not in text:
+            return False
+        if point_type == "page_control" and "页面控制" not in text:
             return False
         if top and top not in text:
             return False

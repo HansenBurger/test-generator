@@ -1,5 +1,5 @@
 <template>
-  <div class="case-container">
+  <div class="case-container" :class="{ expanded: parsedData }">
     <el-tabs v-model="activeTab" class="case-tabs">
       <el-tab-pane label="生成用例" name="generate">
         <el-card class="upload-card" shadow="hover">
@@ -26,7 +26,7 @@
           将XMind拖到此处，或<em>点击上传</em>
         </div>
         <template #tip>
-          <div class="el-upload__tip">仅支持 .xmind 格式</div>
+          <div class="el-upload__tip">仅支持 .xmind 格式，命名规范：需求名_V版本_时间（仅支持单个文件）</div>
         </template>
       </el-upload>
 
@@ -46,45 +46,49 @@
       </template>
       <el-row :gutter="16">
         <el-col :span="8">
-          <div class="stat-item">
-            <div class="stat-title">需求名称</div>
-            <div class="stat-value">{{ parsedData.requirement_name }}</div>
-          </div>
-        </el-col>
-        <el-col :span="8">
-          <div class="stat-item">
-            <div class="stat-title">测试点总数</div>
-            <div class="stat-value">{{ parsedData.stats?.total || 0 }}</div>
-          </div>
-        </el-col>
-        <el-col :span="8">
-          <div class="stat-item">
-            <div class="stat-title">优先级分布</div>
-            <div class="stat-value">
-              高 {{ parsedData.stats?.by_priority?.['1'] || 0 }} /
-              中 {{ parsedData.stats?.by_priority?.['2'] || 0 }} /
-              低 {{ parsedData.stats?.by_priority?.['3'] || 0 }}
+          <div class="stat-stack">
+            <div class="stat-item">
+              <div class="stat-title">需求名称</div>
+              <el-tooltip :content="parsedData.requirement_name" placement="top">
+                <div class="stat-value">{{ parsedData.requirement_name }}</div>
+              </el-tooltip>
+            </div>
+            <div class="stat-item">
+              <div class="stat-title">测试点总数</div>
+              <div class="stat-value">{{ parsedData.stats?.total || 0 }}</div>
             </div>
           </div>
         </el-col>
         <el-col :span="8">
-          <div class="stat-item">
-            <div class="stat-title">流程测试点</div>
-            <div class="stat-value">{{ parsedData.stats?.by_type?.process || 0 }}</div>
+          <div class="stat-stack">
+            <div class="stat-item">
+              <div class="stat-title">流程测试点</div>
+              <div class="stat-value">{{ parsedData.stats?.by_type?.process || 0 }}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-title">规则/页面测试点</div>
+              <div class="stat-value">
+                {{ parsedData.stats?.by_type?.rule || 0 }} / {{ parsedData.stats?.by_type?.page_control || 0 }}
+              </div>
+            </div>
           </div>
         </el-col>
         <el-col :span="8">
-          <div class="stat-item">
-            <div class="stat-title">规则测试点</div>
-            <div class="stat-value">{{ parsedData.stats?.by_type?.rule || 0 }}</div>
-          </div>
-        </el-col>
-        <el-col :span="8">
-          <div class="stat-item">
-            <div class="stat-title">正/反例分布</div>
-            <div class="stat-value">
-              正例 {{ parsedData.stats?.by_subtype?.positive || 0 }} /
-              反例 {{ parsedData.stats?.by_subtype?.negative || 0 }}
+          <div class="stat-stack">
+            <div class="stat-item">
+              <div class="stat-title">优先级分布</div>
+              <div class="stat-value">
+                高 {{ parsedData.stats?.by_priority?.['1'] || 0 }} /
+                中 {{ parsedData.stats?.by_priority?.['2'] || 0 }} /
+                低 {{ parsedData.stats?.by_priority?.['3'] || 0 }}
+              </div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-title">正/反例分布</div>
+              <div class="stat-value">
+                正例 {{ parsedData.stats?.by_subtype?.positive || 0 }} /
+                反例 {{ parsedData.stats?.by_subtype?.negative || 0 }}
+              </div>
             </div>
           </div>
         </el-col>
@@ -546,7 +550,14 @@ const formatTimestamp = () => {
 
 <style scoped>
 .case-container {
-  width: 100%;
+  width: 92%;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.case-container.expanded {
+  width: 98%;
+  max-width: 1400px;
 }
 
 .case-tabs {
@@ -577,6 +588,14 @@ const formatTimestamp = () => {
   padding: 12px;
   background: #f5f7fa;
   border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .stat-title {
@@ -587,6 +606,9 @@ const formatTimestamp = () => {
 
 .stat-value {
   font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .strategy-text {

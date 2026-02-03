@@ -96,11 +96,25 @@ def _normalize_list(value) -> List[str]:
 def _build_case_id() -> str:
     return f"TC{uuid4().hex[:8].upper()}"
 
+def _build_manual_case(point: TestPoint) -> TestCase:
+    return TestCase(
+        case_id=_build_case_id(),
+        point_id=point.point_id,
+        point_type=point.point_type,
+        subtype=point.subtype,
+        priority=point.priority,
+        text=point.text,
+        preconditions=_normalize_list(point.preconditions),
+        steps=_normalize_list(point.steps),
+        expected_results=_normalize_list(point.expected_results)
+    )
+
 
 def _build_user_prompt(point: TestPoint) -> str:
+    point_type = "rule" if point.point_type == "page_control" else point.point_type
     return json.dumps({
         "point_id": point.point_id,
-        "point_type": point.point_type,
+        "point_type": point_type,
         "subtype": point.subtype,
         "priority": point.priority,
         "text": point.text
@@ -110,7 +124,7 @@ def _build_user_prompt(point: TestPoint) -> str:
 def _build_case_example(case: TestCase, for_batch: bool, include_flow_steps: bool) -> str:
     input_payload = {
         "point_id": case.point_id,
-        "point_type": case.point_type,
+        "point_type": "rule" if case.point_type == "page_control" else case.point_type,
         "subtype": case.subtype,
         "priority": case.priority,
         "text": case.text
@@ -134,7 +148,7 @@ def _build_case_example(case: TestCase, for_batch: bool, include_flow_steps: boo
 def _build_prompt_examples(cases: List[TestCase]) -> Dict[str, str]:
     examples: Dict[str, str] = {}
     process_case = next((case for case in cases if case.point_type == "process"), None)
-    rule_case = next((case for case in cases if case.point_type == "rule"), None)
+    rule_case = next((case for case in cases if case.point_type in ("rule", "page_control")), None)
     if process_case:
         examples["process"] = _build_case_example(process_case, for_batch=False, include_flow_steps=False)
         examples["process_batch"] = _build_case_example(process_case, for_batch=True, include_flow_steps=False)
@@ -145,7 +159,7 @@ def _build_prompt_examples(cases: List[TestCase]) -> Dict[str, str]:
 
 def _normalize_context_key(context: Optional[str]) -> str:
     value = context or ""
-    return value.replace("业务规则", "业务流程").strip()
+    return value.replace("业务规则", "业务流程").replace("页面控制", "业务流程").strip()
 
 
 def _chunk_list(items: List[TestPoint], size: int) -> List[List[TestPoint]]:
@@ -327,9 +341,12 @@ class CaseGenerator:
             if point.point_type == "rule" and flow_steps_map is not None:
                 key = _normalize_context_key(point.context)
                 flow_steps = flow_steps_map.get(key, [])
+            if point.point_type == "page_control" and flow_steps_map is not None:
+                key = _normalize_context_key(point.context)
+                flow_steps = flow_steps_map.get(key, [])
             payload.append({
                 "point_id": point.point_id,
-                "point_type": point.point_type,
+                "point_type": "rule" if point.point_type == "page_control" else point.point_type,
                 "subtype": point.subtype,
                 "priority": point.priority,
                 "text": point.text,
@@ -503,11 +520,15 @@ class CaseGenerationManager:
         if not generatable_points:
             raise ValueError("无可生成的测试点（均为低优先级 priority=3）")
 
-        token_usage, logs = self._generator.fill_missing_metadata(generatable_points)
+        ai_points = [p for p in generatable_points if not p.manual_case]
+        token_usage, logs = self._generator.fill_missing_metadata(ai_points)
         selected_points = select_preview_points(generatable_points, count)
 
         cases: List[TestCase] = []
         for point in selected_points:
+            if point.manual_case:
+                cases.append(_build_manual_case(point))
+                continue
             case, tokens = self._generator.generate_case(point, "standard")
             cases.append(case)
             token_usage += tokens
@@ -644,19 +665,43 @@ class CaseGenerationManager:
             repository.update_generation_record(task.session_id, status="processing")
 
         try:
+            manual_points = [p for p in task.points if p.manual_case]
+            ai_points = [p for p in task.points if not p.manual_case]
+            if manual_points:
+                task.logs.append(f"阶段：手工用例挂载，共 {len(manual_points)} 条")
+                for point in manual_points:
+                    task.cases.append(_build_manual_case(point))
+                    task.completed += 1
+                task.progress = (task.completed + task.failed) / max(1, task.total)
+            if not ai_points:
+                task.status = "completed"
+                task.completed_at = datetime.now()
+                generator_logger.info(f"测试用例生成任务完成 - 任务ID: {task_id}")
+                if task.session_id:
+                    json_path = self._save_cases_json(task.session_id, task.cases)
+                    repository.update_generation_record(
+                        task.session_id,
+                        status="completed",
+                        success_count=task.completed,
+                        fail_count=task.failed,
+                        json_path=json_path,
+                        completed_at=task.completed_at
+                    )
+                return
+
             # 预处理：补全元数据
-            conflict_count = sum(1 for p in task.points if _has_subtype_conflict(p.text))
-            missing_count = len([p for p in task.points if not (p.subtype and p.priority)])
+            conflict_count = sum(1 for p in ai_points if _has_subtype_conflict(p.text))
+            missing_count = len([p for p in ai_points if not (p.subtype and p.priority)])
             task.logs.append(f"阶段：预处理（元数据补全），待补全 {missing_count} 条")
             task.logs.append(f"正反例关键词冲突：{conflict_count} 条")
-            token_usage, logs = self._generator.fill_missing_metadata(task.points)
+            token_usage, logs = self._generator.fill_missing_metadata(ai_points)
             task.token_usage += token_usage
             task.logs.extend(logs)
             task.logs.append("阶段：预处理完成")
 
-            point_map = {p.point_id: p for p in task.points}
-            process_points = [p for p in task.points if p.point_type == "process"]
-            rule_points = [p for p in task.points if p.point_type == "rule"]
+            point_map = {p.point_id: p for p in ai_points}
+            process_points = [p for p in ai_points if p.point_type == "process"]
+            rule_points = [p for p in ai_points if p.point_type in ("rule", "page_control")]
 
             flow_steps_map: Dict[str, List[str]] = {}
 

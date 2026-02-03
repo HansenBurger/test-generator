@@ -120,11 +120,15 @@ class TaskStatusResponse(BaseModel):
 class TestPoint(BaseModel):
     """测试点"""
     point_id: str
-    point_type: str  # process / rule
+    point_type: str  # process / rule / page_control
     subtype: Optional[str] = None  # positive / negative
     priority: Optional[int] = None  # 1/2/3
     text: str
     context: Optional[str] = None
+    preconditions: List[str] = []
+    steps: List[str] = []
+    expected_results: List[str] = []
+    manual_case: bool = False
 
 
 class ParsedXmindDocument(BaseModel):

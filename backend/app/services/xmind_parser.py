@@ -16,6 +16,11 @@ class XMindParser:
     """XMind 解析器"""
 
     _NS = {"x": "urn:xmind:xmap:xmlns:content:2.0"}
+    _SECTION_TYPES = {
+        "业务流程": "process",
+        "业务规则": "rule",
+        "页面控制": "page_control"
+    }
 
     def __init__(self, xmind_path: str):
         self.xmind_path = xmind_path
@@ -38,6 +43,7 @@ class XMindParser:
 
         titles = set()
         test_points: List[TestPoint] = []
+        self._total_count = 0
         self._traverse_topics(root_topic, [], titles, test_points)
 
         document_type = "non_modeling" if "功能" in titles else "modeling"
@@ -47,7 +53,7 @@ class XMindParser:
         for idx, point in enumerate(test_points, start=1):
             point.point_id = f"TP{idx:03d}"
 
-        stats = self._build_stats(test_points)
+        stats = self._build_stats(test_points, total_override=self._total_count)
         basic_info = self._extract_basic_info(root_topic)
 
         parse_id = uuid4().hex
@@ -102,26 +108,11 @@ class XMindParser:
             titles.add(title)
         current_path = path_titles + ([title] if title else [])
 
-        if title in ("业务流程", "业务规则"):
+        if title in self._SECTION_TYPES:
+            context = self._build_context(current_path)
+            point_type = self._SECTION_TYPES.get(title, "rule")
             for child in self._get_children(topic):
-                child_title = self._get_title(child)
-                if not child_title:
-                    continue
-                priority, cleaned_title = self._parse_priority(child, child_title)
-                subtype = self._detect_subtype(cleaned_title)
-                context = self._build_context(current_path)
-                point_text = self._build_point_text(context, cleaned_title)
-                point_type = "process" if title == "业务流程" else "rule"
-                points.append(
-                    TestPoint(
-                        point_id="",
-                        point_type=point_type,
-                        subtype=subtype,
-                        priority=priority,
-                        text=point_text,
-                        context=context
-                    )
-                )
+                self._parse_test_point(child, point_type, context, points)
             return
 
         for child in self._get_children(topic):
@@ -135,6 +126,13 @@ class XMindParser:
         if context:
             return f"{context} - {title}"
         return title
+
+    def _merge_titles(self, base: str, extra: str) -> str:
+        if not base:
+            return extra
+        if not extra:
+            return base
+        return f"{base} - {extra}"
 
     def _parse_root_title(self, title: str) -> Tuple[Optional[str], str]:
         if not title:
@@ -177,6 +175,216 @@ class XMindParser:
                     info["designer"] = value or None
             break
         return info
+
+    def _max_depth(self, topic: ET.Element) -> int:
+        children = [child for child in self._get_children(topic) if self._get_title(child)]
+        if not children:
+            return 0
+        return 1 + max(self._max_depth(child) for child in children)
+
+    def _has_wrong_marker(self, topic: ET.Element) -> bool:
+        for elem in topic.iter():
+            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if tag != "marker-ref":
+                continue
+            marker_id = elem.attrib.get("marker-id", "")
+            if marker_id == "symbol-wrong":
+                return True
+        marker_attr = topic.attrib.get("markers", "")
+        if marker_attr:
+            return "symbol-wrong" in {m.strip() for m in marker_attr.split(",") if m.strip()}
+        return False
+
+    def _append_point(
+        self,
+        points: List[TestPoint],
+        point_type: str,
+        priority: Optional[int],
+        subtype: Optional[str],
+        context: str,
+        title: str,
+        manual_case: bool = False,
+        preconditions: Optional[List[str]] = None,
+        steps: Optional[List[str]] = None,
+        expected_results: Optional[List[str]] = None
+    ):
+        points.append(
+            TestPoint(
+                point_id="",
+                point_type=point_type,
+                subtype=subtype,
+                priority=priority,
+                text=self._build_point_text(context, title),
+                context=context,
+                preconditions=preconditions or [],
+                steps=steps or [],
+                expected_results=expected_results or [],
+                manual_case=manual_case
+            )
+        )
+
+    def _parse_test_point(
+        self,
+        node: ET.Element,
+        point_type: str,
+        context: str,
+        points: List[TestPoint]
+    ):
+        node_title = self._get_title(node)
+        if not node_title:
+            return
+        priority, cleaned_title = self._parse_priority(node, node_title)
+        children = [child for child in self._get_children(node) if self._get_title(child)]
+        depth = self._max_depth(node)
+        if depth > 3:
+            return
+
+        if depth == 0 or not children:
+            subtype = self._detect_subtype(cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._total_count += 1
+            return
+
+        if depth == 1:
+            for child in children:
+                child_title = self._get_title(child)
+                if not child_title:
+                    continue
+                child_priority, child_cleaned = self._parse_priority(child, child_title)
+                merged_title = self._merge_titles(cleaned_title, child_cleaned)
+                subtype = self._detect_subtype(merged_title)
+                effective_priority = child_priority or priority
+                self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
+            self._total_count += len(children)
+            return
+
+        if len(children) > 1 and depth >= 2:
+            chains = []
+            for child in children:
+                child_title = self._get_title(child)
+                if not child_title:
+                    chains = []
+                    break
+                child_priority, child_cleaned = self._parse_priority(child, child_title)
+                depth2_nodes = [n for n in self._get_children(child) if self._get_title(n)]
+                if len(depth2_nodes) != 1:
+                    chains = []
+                    break
+                depth2_node = depth2_nodes[0]
+                depth2_title = self._get_title(depth2_node)
+                if not depth2_title:
+                    chains = []
+                    break
+                depth3_nodes = [n for n in self._get_children(depth2_node) if self._get_title(n)]
+                if len(depth3_nodes) != 1:
+                    chains = []
+                    break
+                depth3_node = depth3_nodes[0]
+                depth3_title = self._get_title(depth3_node)
+                if not depth3_title:
+                    chains = []
+                    break
+                chains.append((child_priority, child_cleaned, depth2_title, depth3_title, depth3_node))
+            if chains:
+                for child_priority, child_cleaned, depth2_title, depth3_title, depth3_node in chains:
+                    if self._has_wrong_marker(depth3_node):
+                        subtype = "negative"
+                    else:
+                        subtype = self._detect_subtype(depth3_title)
+                    effective_priority = child_priority or priority
+                    self._append_point(
+                        points,
+                        point_type,
+                        effective_priority,
+                        subtype,
+                        context,
+                        cleaned_title,
+                        manual_case=True,
+                        preconditions=[child_cleaned],
+                        steps=[depth2_title],
+                        expected_results=[depth3_title]
+                    )
+                self._total_count += len(chains)
+                return
+
+        if len(children) != 1:
+            subtype = self._detect_subtype(cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._total_count += 1
+            return
+
+        depth1_node = children[0]
+        depth1_title = self._get_title(depth1_node)
+        if not depth1_title:
+            subtype = self._detect_subtype(cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._total_count += 1
+            return
+        depth1_priority, depth1_cleaned = self._parse_priority(depth1_node, depth1_title)
+        base_title = self._merge_titles(cleaned_title, depth1_cleaned)
+        depth2_nodes = [child for child in self._get_children(depth1_node) if self._get_title(child)]
+
+        if depth == 2:
+            if not depth2_nodes:
+                subtype = self._detect_subtype(cleaned_title)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+                self._total_count += 1
+                return
+            for child in depth2_nodes:
+                child_title = self._get_title(child)
+                if not child_title:
+                    continue
+                merged_title = self._merge_titles(base_title, child_title)
+                subtype = self._detect_subtype(merged_title)
+                effective_priority = depth1_priority or priority
+                self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
+            self._total_count += 1
+            return
+
+        if len(depth2_nodes) != 1:
+            subtype = self._detect_subtype(cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._total_count += 1
+            return
+
+        depth2_node = depth2_nodes[0]
+        depth2_title = self._get_title(depth2_node)
+        if not depth2_title:
+            subtype = self._detect_subtype(cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._total_count += 1
+            return
+        depth3_nodes = [child for child in self._get_children(depth2_node) if self._get_title(child)]
+        if len(depth3_nodes) != 1:
+            subtype = self._detect_subtype(cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._total_count += 1
+            return
+        depth3_node = depth3_nodes[0]
+        depth3_title = self._get_title(depth3_node)
+        if not depth3_title:
+            subtype = self._detect_subtype(cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._total_count += 1
+            return
+        if self._has_wrong_marker(depth3_node):
+            subtype = "negative"
+        else:
+            subtype = self._detect_subtype(depth3_title)
+        effective_priority = depth1_priority or priority
+        self._append_point(
+            points,
+            point_type,
+            effective_priority,
+            subtype,
+            context,
+            cleaned_title,
+            manual_case=True,
+            preconditions=[depth1_cleaned],
+            steps=[depth2_title],
+            expected_results=[depth3_title]
+        )
+        self._total_count += 1
 
     def _parse_priority(self, topic: ET.Element, title: str) -> Tuple[Optional[int], str]:
         marker_priority = self._get_marker_priority(topic)
@@ -234,10 +442,10 @@ class XMindParser:
             return "positive"
         return None
 
-    def _build_stats(self, points: List[TestPoint]) -> dict:
+    def _build_stats(self, points: List[TestPoint], total_override: Optional[int] = None) -> dict:
         stats = {
-            "total": len(points),
-            "by_type": {"process": 0, "rule": 0},
+            "total": total_override if total_override is not None else len(points),
+            "by_type": {"process": 0, "rule": 0, "page_control": 0},
             "by_priority": {"1": 0, "2": 0, "3": 0, "unknown": 0},
             "by_subtype": {"positive": 0, "negative": 0, "unknown": 0}
         }
