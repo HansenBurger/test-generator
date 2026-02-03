@@ -106,6 +106,28 @@ EOF
     print_warn "请运行以下命令重启Docker: sudo systemctl restart docker"
 }
 
+# 检查 DASHSCOPE_API_KEY 是否已配置（.env 或环境变量）
+check_dashscope_key() {
+    local key_value=""
+    if [ -f ".env" ]; then
+        key_value=$(grep -E "^DASHSCOPE_API_KEY=.+" .env 2>/dev/null | cut -d= -f2- | tr -d "\"\\'")
+    fi
+    if [ -z "$key_value" ]; then
+        key_value="${DASHSCOPE_API_KEY:-}"
+    fi
+    if [ -z "$key_value" ]; then
+        print_error "未配置 DASHSCOPE_API_KEY，后端将无法启动"
+        echo ""
+        echo "请按以下步骤配置："
+        echo "  1. 复制示例: cp .env.example .env"
+        echo "  2. 编辑 .env，填入阿里云百炼 API Key: DASHSCOPE_API_KEY=sk-你的密钥"
+        echo "  或导出环境变量: export DASHSCOPE_API_KEY=sk-你的密钥"
+        echo ""
+        return 1
+    fi
+    return 0
+}
+
 # 构建镜像
 build_images() {
     print_info "开始构建Docker镜像..."
@@ -116,6 +138,9 @@ build_images() {
 
 # 启动服务
 start_services() {
+    if ! check_dashscope_key; then
+        exit 1
+    fi
     print_info "启动服务..."
     COMPOSE_CMD=$(detect_compose_cmd)
     $COMPOSE_CMD up -d
@@ -216,6 +241,7 @@ main() {
             clean
             ;;
         deploy)
+            if ! check_dashscope_key; then exit 1; fi
             configure_docker_mirror
             build_images
             start_services
@@ -252,6 +278,7 @@ main() {
                         view_logs
                         ;;
                     8)
+                        if ! check_dashscope_key; then continue; fi
                         configure_docker_mirror
                         build_images
                         start_services
