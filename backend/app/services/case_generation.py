@@ -6,6 +6,8 @@ import os
 import re
 import threading
 import os as _os
+import difflib
+from collections import Counter
 from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -19,6 +21,8 @@ from app.services.prompts import (
     PROMPT_VERSION,
     SYSTEM_PROMPT_METADATA,
     SYSTEM_PROMPT_METADATA_BATCH,
+    SYSTEM_PROMPT_METADATA_STRICT,
+    RULE_GROUPING_PROMPT,
     get_case_prompt,
     get_case_batch_prompt
 )
@@ -33,6 +37,9 @@ ENABLE_PROCESS_BATCH = False
 ENABLE_RULE_BATCH = (_os.getenv("ENABLE_RULE_BATCH", "1") == "1")
 RULE_BATCH_SIZE = 20
 RULE_BATCH_CONCURRENCY = int(_os.getenv("RULE_BATCH_CONCURRENCY", "3") or 3)
+RULE_GROUP_MIN_SIZE = int(_os.getenv("RULE_GROUP_MIN_SIZE", "6") or 6)
+RULE_GROUP_WEIGHT_CONTEXT = float(_os.getenv("RULE_GROUP_WEIGHT_CONTEXT", "2.0") or 2.0)
+RULE_GROUP_WEIGHT_KEY = float(_os.getenv("RULE_GROUP_WEIGHT_KEY", "1.0") or 1.0)
 METADATA_BATCH_SIZE = 10
 METADATA_BATCH_CONCURRENCY = int(_os.getenv("METADATA_BATCH_CONCURRENCY", "3") or 3)
 
@@ -130,6 +137,103 @@ def _numbered_list(items: List[str]) -> List[str]:
         seen.add(text)
         cleaned.append(text)
     return cleaned
+
+
+def _cap_list(items: List[str], limit: int) -> List[str]:
+    if limit <= 0:
+        return []
+    return items[:limit]
+
+
+def _apply_rule_limits(case: TestCase) -> None:
+    if case.point_type not in ("rule", "page_control"):
+        return
+    case.preconditions = _cap_list(case.preconditions or [], 3)
+    case.steps = _cap_list(case.steps or [], 5)
+    if case.steps:
+        case.expected_results = _cap_list(case.expected_results or [], len(case.steps))
+
+
+def _context_key_for_point(point: TestPoint) -> str:
+    return _normalize_context_key(point.context) or ""
+
+
+def _dominant_context(points: List[TestPoint]) -> str:
+    counter = Counter(_context_key_for_point(p) for p in points if _context_key_for_point(p))
+    if not counter:
+        return ""
+    return counter.most_common(1)[0][0]
+
+
+def _group_key_similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _group_match_score(source: dict, target: dict) -> float:
+    score = 0.0
+    if source.get("context_key") and source.get("context_key") == target.get("context_key"):
+        score += RULE_GROUP_WEIGHT_CONTEXT
+    score += RULE_GROUP_WEIGHT_KEY * _group_key_similarity(
+        source.get("base_key", ""),
+        target.get("base_key", "")
+    )
+    return score
+
+
+def _split_oversized_groups(groups: List[dict], max_size: int) -> List[dict]:
+    if max_size <= 0:
+        return groups
+    new_groups: List[dict] = []
+    for group in groups:
+        points = group["points"]
+        if len(points) <= max_size:
+            new_groups.append(group)
+            continue
+        by_context: Dict[str, List[TestPoint]] = {}
+        for point in points:
+            ctx = _context_key_for_point(point)
+            by_context.setdefault(ctx or "其他", []).append(point)
+        idx = 1
+        for ctx, ctx_points in by_context.items():
+            for chunk in _chunk_list(ctx_points, max_size):
+                new_groups.append(
+                    {
+                        "key": f"{group['key']}#{idx}",
+                        "base_key": group["base_key"],
+                        "points": chunk,
+                        "context_key": ctx if ctx != "其他" else ""
+                    }
+                )
+                idx += 1
+    return new_groups
+
+
+def _merge_small_groups(groups: List[dict], min_size: int, max_size: int) -> List[dict]:
+    if min_size <= 1:
+        return groups
+    changed = True
+    while changed and len(groups) > 1:
+        changed = False
+        groups.sort(key=lambda g: len(g["points"]))
+        small = next((g for g in groups if len(g["points"]) < min_size), None)
+        if not small:
+            break
+        candidates = [
+            g for g in groups
+            if g is not small
+            and len(g["points"]) < max_size
+            and len(g["points"]) + len(small["points"]) <= max_size
+        ]
+        if not candidates:
+            break
+        target = max(candidates, key=lambda g: _group_match_score(small, g))
+        target["points"].extend(small["points"])
+        target["context_key"] = _dominant_context(target["points"])
+        groups.remove(small)
+        changed = True
+    return groups
 
 
 def _merge_unique(target: List[str], items: List[str]) -> None:
@@ -296,7 +400,7 @@ class CaseGenerator:
             result, tokens = self._client.chat_json(
                 system_prompt=SYSTEM_PROMPT_METADATA_BATCH,
                 user_prompt=json.dumps(payload, ensure_ascii=False),
-                temperature=0.1,
+                temperature=0.0,
                 max_tokens=800
             )
             if not isinstance(result, list):
@@ -334,6 +438,21 @@ class CaseGenerator:
             if attempt < 2:
                 logs.append(f"元数据单点补全失败，重试一次：{str(exc)}")
                 return self._request_metadata_batch(batch, attempt=attempt + 1)
+            # 严格模式再尝试一次，降低输出漂移概率
+            try:
+                strict_payload = batch[0].text if batch else ""
+                strict_result, strict_tokens = self._client.chat_json(
+                    system_prompt=SYSTEM_PROMPT_METADATA_STRICT,
+                    user_prompt=strict_payload,
+                    temperature=0.0,
+                    max_tokens=200
+                )
+                if isinstance(strict_result, dict):
+                    return {
+                        str(batch[0].point_id): strict_result
+                    }, strict_tokens, logs + ["元数据单点补全：严格模式成功"]
+            except Exception as strict_exc:
+                logs.append(f"元数据单点严格模式失败：{str(strict_exc)}")
             logs.append(f"元数据单点补全失败：{str(exc)}")
             return {}, 0, logs
 
@@ -374,6 +493,76 @@ class CaseGenerator:
                     point.priority = point.priority or meta.get("priority")
         return token_usage, logs
 
+    def group_rule_points_by_relevance(
+        self,
+        points: List[TestPoint],
+        max_batch_size: int,
+        min_group_size: int
+    ) -> Tuple[List[List[TestPoint]], int, List[str]]:
+        if not points:
+            return [], 0, []
+        if len(points) <= max_batch_size:
+            return [points], 0, [f"规则分组：数量 {len(points)}，无需分组"]
+        payload = [
+            {
+                "point_id": p.point_id,
+                "text": p.text,
+                "context": p.context or ""
+            }
+            for p in points
+        ]
+        logs: List[str] = []
+        token_usage = 0
+        try:
+            result, tokens = self._client.chat_json(
+                system_prompt=RULE_GROUPING_PROMPT,
+                user_prompt=json.dumps(payload, ensure_ascii=False),
+                temperature=0.1,
+                max_tokens=min(4000, 600 + len(points) * 20)
+            )
+            token_usage += tokens
+            if not isinstance(result, list):
+                raise ValueError("规则分组失败：返回格式非数组")
+            group_map = {
+                str(item.get("point_id")): (item.get("group_key") or "").strip()
+                for item in result
+                if isinstance(item, dict) and item.get("point_id") is not None
+            }
+            if not group_map:
+                raise ValueError("规则分组失败：返回结果为空")
+            logs.append(f"规则分组：AI 已返回 {len(group_map)} 条分组结果")
+        except Exception as exc:
+            logs.append(f"规则分组失败，回退到上下文分组：{str(exc)}")
+            group_map = {}
+
+        grouped: Dict[str, List[TestPoint]] = {}
+        for point in points:
+            key = (group_map.get(point.point_id) or "").strip()
+            if not key:
+                key = _normalize_context_key(point.context) or "其他"
+            grouped.setdefault(key, []).append(point)
+
+        groups: List[dict] = []
+        for key, group_points in grouped.items():
+            groups.append(
+                {
+                    "key": key,
+                    "base_key": key,
+                    "points": group_points,
+                    "context_key": _dominant_context(group_points)
+                }
+            )
+        groups = _split_oversized_groups(groups, max_batch_size)
+        groups = _merge_small_groups(groups, min_group_size, max_batch_size)
+
+        batches: List[List[TestPoint]] = [group["points"] for group in groups]
+        logs.append(
+            f"规则分组完成：{len(groups)} 组，批次数 {len(batches)}，"
+            f"最小组 {min(len(g['points']) for g in groups)}，"
+            f"最大组 {max(len(g['points']) for g in groups)}"
+        )
+        return batches, token_usage, logs
+
     def generate_case(
         self,
         point: TestPoint,
@@ -406,6 +595,7 @@ class CaseGenerator:
             steps=_normalize_list(result.get("steps")),
             expected_results=_normalize_list(result.get("expected_results"))
         )
+        _apply_rule_limits(case)
         return case, tokens
 
     def generate_cases_batch(
@@ -552,6 +742,7 @@ class CaseGenerator:
                 steps=_normalize_list(item.get("steps")),
                 expected_results=_normalize_list(item.get("expected_results"))
             )
+            _apply_rule_limits(case)
             cases.append(case)
         if missing_ids:
             sample = ", ".join(missing_ids[:5])
@@ -905,9 +1096,18 @@ class CaseGenerationManager:
                     f"流程批 {idx}/{len(process_batches)} 完成：成功 {len(cases)}，失败 {failed_in_batch}，进度 {task.completed}/{task.total}"
                 )
 
-            # 规则批次：按每 20 条分段，可并发请求，谁先返回谁先入库（不影响 JSON 格式）
+            # 规则批次：基于相关度分组后再分批
             if rule_points:
-                rule_batches = _chunk_list(rule_points, RULE_BATCH_SIZE if ENABLE_RULE_BATCH else BATCH_SIZE)
+                max_batch_size = RULE_BATCH_SIZE if ENABLE_RULE_BATCH else BATCH_SIZE
+                rule_batches, group_tokens, group_logs = self._generator.group_rule_points_by_relevance(
+                    rule_points,
+                    max_batch_size,
+                    RULE_GROUP_MIN_SIZE
+                )
+                task.token_usage += group_tokens
+                task.logs.extend(group_logs)
+                if not rule_batches:
+                    rule_batches = _chunk_list(rule_points, max_batch_size)
                 task.logs.append(f"阶段：规则用例生成，共 {len(rule_points)} 条，批次数 {len(rule_batches)}")
             else:
                 rule_batches = []
