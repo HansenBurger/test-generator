@@ -3,6 +3,7 @@
 """
 import json
 import os
+import re
 import threading
 import os as _os
 from concurrent.futures import as_completed
@@ -83,14 +84,81 @@ def select_preview_points(points: List[TestPoint], count: Optional[int]) -> List
     return selected
 
 
+_INDEX_PREFIX_PATTERN = re.compile(r"^\s*(?:[（(]?\d+[)）]?|[一二三四五六七八九十]+)[\.\、)）]\s*")
+
+
+def _strip_leading_index(text: str) -> str:
+    cleaned = text.strip()
+    while True:
+        updated = _INDEX_PREFIX_PATTERN.sub("", cleaned)
+        if updated == cleaned:
+            return cleaned
+        cleaned = updated.strip()
+
+
 def _normalize_list(value) -> List[str]:
     if value is None:
         return []
     if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
+        cleaned = []
+        for item in value:
+            for part in str(item).splitlines():
+                text = _strip_leading_index(part)
+                if text:
+                    cleaned.append(text)
+        return cleaned
     if isinstance(value, str):
-        return [v.strip() for v in value.split("\n") if v.strip()]
-    return [str(value).strip()]
+        cleaned = []
+        for item in value.split("\n"):
+            text = _strip_leading_index(item)
+            if text:
+                cleaned.append(text)
+        return cleaned
+    text = _strip_leading_index(str(value))
+    return [text] if text else []
+
+
+def _numbered_list(items: List[str]) -> List[str]:
+    cleaned = []
+    seen = set()
+    for item in items:
+        text = _strip_leading_index(item)
+        if not text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned
+
+
+def _merge_unique(target: List[str], items: List[str]) -> None:
+    for item in _normalize_list(items):
+        if item not in target:
+            target.append(item)
+
+
+def _build_manual_templates(points: List[TestPoint]) -> Dict[str, Dict[str, List[str]]]:
+    templates: Dict[str, Dict[str, List[str]]] = {}
+    for point in points:
+        if not point.manual_case or point.point_type != "process":
+            continue
+        key = _normalize_context_key(point.context)
+        entry = templates.setdefault(key, {"preconditions": [], "steps": []})
+        _merge_unique(entry["preconditions"], point.preconditions)
+        _merge_unique(entry["steps"], point.steps)
+    return templates
+
+
+def _build_flow_preconditions_map(cases: List[TestCase]) -> Dict[str, List[str]]:
+    flow_map: Dict[str, List[str]] = {}
+    for case in cases:
+        if case.point_type != "process":
+            continue
+        key = _normalize_context_key(case.text)
+        flow_map.setdefault(key, [])
+        _merge_unique(flow_map[key], case.preconditions or [])
+    return flow_map
 
 
 def _build_case_id() -> str:
@@ -110,15 +178,44 @@ def _build_manual_case(point: TestPoint) -> TestCase:
     )
 
 
-def _build_user_prompt(point: TestPoint) -> str:
+def _resolve_manual_template(
+    point: TestPoint,
+    manual_templates_map: Optional[Dict[str, Dict[str, List[str]]]]
+) -> Optional[Dict[str, List[str]]]:
+    if not manual_templates_map:
+        return None
+    key = _normalize_context_key(point.context)
+    template = manual_templates_map.get(key)
+    if not template and len(manual_templates_map) == 1:
+        template = next(iter(manual_templates_map.values()))
+    if not template:
+        return None
+    if not template.get("preconditions") and not template.get("steps"):
+        return None
+    return template
+
+
+def _build_user_prompt(
+    point: TestPoint,
+    manual_template: Optional[Dict[str, List[str]]] = None,
+    flow_preconditions: Optional[List[str]] = None
+) -> str:
     point_type = "rule" if point.point_type == "page_control" else point.point_type
-    return json.dumps({
+    payload = {
         "point_id": point.point_id,
         "point_type": point_type,
         "subtype": point.subtype,
         "priority": point.priority,
         "text": point.text
-    }, ensure_ascii=False)
+    }
+    if manual_template:
+        payload["manual_preconditions"] = manual_template.get("preconditions", [])
+        payload["manual_steps"] = manual_template.get("steps", [])
+        if point_type in ("rule", "page_control"):
+            payload["flow_steps"] = manual_template.get("steps", [])
+    if flow_preconditions and point_type in ("rule", "page_control"):
+        payload["flow_preconditions"] = flow_preconditions
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _build_case_example(case: TestCase, for_batch: bool, include_flow_steps: bool) -> str:
@@ -281,13 +378,20 @@ class CaseGenerator:
         self,
         point: TestPoint,
         strategy: str = "standard",
-        prompt_examples: Optional[Dict[str, str]] = None
+        prompt_examples: Optional[Dict[str, str]] = None,
+        manual_templates_map: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        flow_preconditions_map: Optional[Dict[str, List[str]]] = None
     ) -> Tuple[TestCase, int]:
         temperature = 0.2 if strategy == "standard" else 0.6
         max_tokens = 900 if strategy == "standard" else 600
+        manual_template = _resolve_manual_template(point, manual_templates_map)
+        flow_preconditions = None
+        if flow_preconditions_map and point.point_type in ("rule", "page_control"):
+            key = _normalize_context_key(point.context)
+            flow_preconditions = flow_preconditions_map.get(key, [])
         result, tokens = self._client.chat_json(
             system_prompt=self._resolve_case_prompt(point.point_type, strategy, prompt_examples, for_batch=False),
-            user_prompt=_build_user_prompt(point),
+            user_prompt=_build_user_prompt(point, manual_template, flow_preconditions),
             temperature=temperature,
             max_tokens=max_tokens
         )
@@ -310,7 +414,9 @@ class CaseGenerator:
         strategy: str,
         flow_steps_map: Optional[Dict[str, List[str]]] = None,
         enable_batch: bool = False,
-        prompt_examples: Optional[Dict[str, str]] = None
+        prompt_examples: Optional[Dict[str, str]] = None,
+        manual_templates_map: Optional[Dict[str, Dict[str, List[str]]]] = None,
+        flow_preconditions_map: Optional[Dict[str, List[str]]] = None
     ) -> Tuple[List[TestCase], int, List[str]]:
         if not enable_batch:
             cases: List[TestCase] = []
@@ -319,7 +425,13 @@ class CaseGenerator:
             failed_ids: List[str] = []
             for point in points:
                 try:
-                    case, tokens = self.generate_case(point, strategy, prompt_examples=prompt_examples)
+                    case, tokens = self.generate_case(
+                        point,
+                        strategy,
+                        prompt_examples=prompt_examples,
+                        manual_templates_map=manual_templates_map,
+                        flow_preconditions_map=flow_preconditions_map
+                    )
                     cases.append(case)
                     token_usage += tokens
                 except Exception as exc:
@@ -344,14 +456,27 @@ class CaseGenerator:
             if point.point_type == "page_control" and flow_steps_map is not None:
                 key = _normalize_context_key(point.context)
                 flow_steps = flow_steps_map.get(key, [])
-            payload.append({
+            manual_template = _resolve_manual_template(point, manual_templates_map)
+            if not flow_steps and manual_template and point.point_type in ("rule", "page_control"):
+                flow_steps = manual_template.get("steps", []) or []
+            flow_preconditions = []
+            if flow_preconditions_map and point.point_type in ("rule", "page_control"):
+                key = _normalize_context_key(point.context)
+                flow_preconditions = flow_preconditions_map.get(key, [])
+            item = {
                 "point_id": point.point_id,
                 "point_type": "rule" if point.point_type == "page_control" else point.point_type,
                 "subtype": point.subtype,
                 "priority": point.priority,
                 "text": point.text,
                 "flow_steps": flow_steps
-            })
+            }
+            if manual_template:
+                item["manual_preconditions"] = manual_template.get("preconditions", [])
+                item["manual_steps"] = manual_template.get("steps", [])
+            if flow_preconditions:
+                item["flow_preconditions"] = flow_preconditions
+            payload.append(item)
         logs: List[str] = []
         try:
             result, tokens = self._client.chat_json(
@@ -378,20 +503,30 @@ class CaseGenerator:
                     strategy,
                     flow_steps_map=flow_steps_map,
                     enable_batch=True,
-                    prompt_examples=prompt_examples
+                    prompt_examples=prompt_examples,
+                    manual_templates_map=manual_templates_map,
+                    flow_preconditions_map=flow_preconditions_map
                 )
                 right_cases, right_tokens, right_logs = self.generate_cases_batch(
                     right,
                     strategy,
                     flow_steps_map=flow_steps_map,
                     enable_batch=True,
-                    prompt_examples=prompt_examples
+                    prompt_examples=prompt_examples,
+                    manual_templates_map=manual_templates_map,
+                    flow_preconditions_map=flow_preconditions_map
                 )
                 return left_cases + right_cases, left_tokens + right_tokens, logs + left_logs + right_logs
 
             # 只有 1 条仍失败：改用单点 prompt 生成（更稳）
             try:
-                case, single_tokens = self.generate_case(points[0], strategy, prompt_examples=prompt_examples)
+                case, single_tokens = self.generate_case(
+                    points[0],
+                    strategy,
+                    prompt_examples=prompt_examples,
+                    manual_templates_map=manual_templates_map,
+                    flow_preconditions_map=flow_preconditions_map
+                )
                 return [case], single_tokens, logs + ["单点降级成功"]
             except Exception as inner_exc:
                 return [], 0, logs + [f"单点降级仍失败：{str(inner_exc)}"]
@@ -510,7 +645,11 @@ class CaseGenerationManager:
         with self._lock:
             return self._preview_cache.get(preview_id)
 
-    def generate_preview(self, parse_id: str, count: Optional[int]) -> Tuple[str, List[TestCase], int, List[str]]:
+    def generate_preview(
+        self,
+        parse_id: str,
+        count: Optional[int]
+    ) -> Tuple[str, List[TestCase], int, List[str], int, int, int]:
         parsed = self.get_parsed_doc(parse_id)
         if not parsed:
             raise ValueError("解析结果不存在，请先上传并解析XMind")
@@ -523,18 +662,26 @@ class CaseGenerationManager:
         ai_points = [p for p in generatable_points if not p.manual_case]
         token_usage, logs = self._generator.fill_missing_metadata(ai_points)
         selected_points = select_preview_points(generatable_points, count)
+        total_count = len(generatable_points)
+        preview_count = len(selected_points)
+        remaining_count = max(0, total_count - preview_count)
+        manual_templates_map = _build_manual_templates(parsed.test_points)
 
         cases: List[TestCase] = []
         for point in selected_points:
             if point.manual_case:
                 cases.append(_build_manual_case(point))
                 continue
-            case, tokens = self._generator.generate_case(point, "standard")
+            case, tokens = self._generator.generate_case(
+                point,
+                "standard",
+                manual_templates_map=manual_templates_map
+            )
             cases.append(case)
             token_usage += tokens
 
         preview_id = self.create_preview(parse_id, cases, [p.point_id for p in selected_points])
-        return preview_id, cases, token_usage, logs
+        return preview_id, cases, token_usage, logs, total_count, preview_count, remaining_count
 
     def create_task_from_preview(
         self,
@@ -605,8 +752,13 @@ class CaseGenerationManager:
         task_id = uuid4().hex
         session_id = session_id or uuid4().hex
         prompt_examples: Dict[str, str] = {}
+        manual_cases = [_build_manual_case(p) for p in points if p.manual_case]
+        if manual_cases:
+            prompt_examples.update(_build_prompt_examples(manual_cases))
         if generation_mode == "preview" and initial_cases:
-            prompt_examples = _build_prompt_examples(initial_cases)
+            preview_examples = _build_prompt_examples(initial_cases)
+            for key, value in preview_examples.items():
+                prompt_examples.setdefault(key, value)
         task = GenerationTask(
             task_id=task_id,
             requirement_name=requirement_name,
@@ -665,6 +817,12 @@ class CaseGenerationManager:
             repository.update_generation_record(task.session_id, status="processing")
 
         try:
+            manual_source_points = task.points
+            if task.parse_id:
+                parsed = self.get_parsed_doc(task.parse_id)
+                if parsed:
+                    manual_source_points = parsed.test_points
+            manual_templates_map = _build_manual_templates(manual_source_points)
             manual_points = [p for p in task.points if p.manual_case]
             ai_points = [p for p in task.points if not p.manual_case]
             if manual_points:
@@ -704,6 +862,15 @@ class CaseGenerationManager:
             rule_points = [p for p in ai_points if p.point_type in ("rule", "page_control")]
 
             flow_steps_map: Dict[str, List[str]] = {}
+            for key, template in manual_templates_map.items():
+                steps = _normalize_list(template.get("steps"))
+                if steps:
+                    flow_steps_map.setdefault(key, []).extend(steps)
+            flow_preconditions_map: Dict[str, List[str]] = {}
+            for key, template in manual_templates_map.items():
+                preconditions = _normalize_list(template.get("preconditions"))
+                if preconditions:
+                    flow_preconditions_map.setdefault(key, []).extend(preconditions)
 
             if process_points:
                 process_batches = _chunk_list(process_points, BATCH_SIZE)
@@ -717,7 +884,8 @@ class CaseGenerationManager:
                     batch,
                     task.strategy,
                     enable_batch=ENABLE_PROCESS_BATCH,
-                    prompt_examples=task.prompt_examples
+                    prompt_examples=task.prompt_examples,
+                    manual_templates_map=manual_templates_map
                 )
                 task.token_usage += tokens
                 task.logs.extend(batch_logs)
@@ -728,6 +896,7 @@ class CaseGenerationManager:
                     if point:
                         key = _normalize_context_key(point.context)
                         flow_steps_map.setdefault(key, []).extend(case.steps or [])
+                        flow_preconditions_map.setdefault(key, []).extend(case.preconditions or [])
                 failed_in_batch = len(batch) - len(cases)
                 if failed_in_batch > 0:
                     task.failed += failed_in_batch
@@ -755,7 +924,9 @@ class CaseGenerationManager:
                             task.strategy,
                             flow_steps_map,
                             True,
-                            task.prompt_examples
+                            task.prompt_examples,
+                            manual_templates_map,
+                            flow_preconditions_map
                         ): (i, batch)
                         for i, batch in enumerate(rule_batches, start=1)
                     }
@@ -781,7 +952,9 @@ class CaseGenerationManager:
                         task.strategy,
                         flow_steps_map=flow_steps_map,
                         enable_batch=False,
-                        prompt_examples=task.prompt_examples
+                        prompt_examples=task.prompt_examples,
+                        manual_templates_map=manual_templates_map,
+                        flow_preconditions_map=flow_preconditions_map
                     )
                     task.token_usage += tokens
                     task.logs.extend(batch_logs)
@@ -826,7 +999,14 @@ class CaseGenerationManager:
     def _save_cases_json(self, session_id: str, cases: List[TestCase]) -> str:
         generation_dir = get_generation_dir()
         path = os.path.join(generation_dir, f"cases_{session_id}.json")
-        save_json(path, [case.model_dump() for case in cases])
+        payload = []
+        for case in cases:
+            data = case.model_dump()
+            data["preconditions"] = _numbered_list(data.get("preconditions") or [])
+            data["steps"] = _numbered_list(data.get("steps") or [])
+            data["expected_results"] = _numbered_list(data.get("expected_results") or [])
+            payload.append(data)
+        save_json(path, payload)
         return path
 
 

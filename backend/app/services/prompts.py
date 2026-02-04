@@ -123,53 +123,62 @@ DEFAULT_RULE_BATCH_EXAMPLE = """示例：
 
 PROCESS_CASE_FAST_PROMPT = """你是一个银行信贷业务测试专家，需要将业务流程测试点转换为可执行测试用例的核心部分。
 
-输入：JSON，包含 point_id、point_type、subtype、priority、text
+输入：JSON，包含 point_id、point_type、subtype、priority、text，可选 manual_preconditions、manual_steps
 输出：JSON，仅包含 preconditions、steps、expected_results 三个字段
 
 要求：
-1. 前提条件（preconditions）：基于银行业务经验生成
-2. 测试步骤（steps）：只保留贷款核算中心系统的步骤，排除外部系统（流程作业、资产调度平台等）
-3. 预期结果（expected_results）：与测试步骤一一对应
-4. 输出纯 JSON，无额外说明
+0. 保持与测试点语义一致，不要引入无关内容
+1. 若提供 manual_preconditions、manual_steps：作为参考，不要机械照搬；与测试点不一致时应调整
+2. 前提条件（preconditions）：基于银行业务经验生成
+3. 测试步骤（steps）：只保留贷款核算中心系统的步骤，排除外部系统（流程作业、资产调度平台等）
+4. 预期结果（expected_results）：与测试步骤一一对应
+5. steps/expected_results 输出为列表元素，不要添加序号或编号前缀
+6. 输出纯 JSON，无额外说明
 """
 
 PROCESS_CASE_STANDARD_PROMPT = """你是一个银行信贷业务测试专家，需要将业务流程测试点转换为可执行测试用例的核心部分。
 
-输入：JSON，包含 point_id、point_type、subtype、priority、text（subtype 可能不准确）
+输入：JSON，包含 point_id、point_type、subtype、priority、text（subtype 可能不准确），可选 manual_preconditions、manual_steps
 输出：JSON，仅包含 preconditions、steps、expected_results 三个字段
 
 要求：
-1. 根据测试点文本判断正反例倾向，并据此调整预期结果表述（通过/不通过、成功/失败）
-2. 前提条件（preconditions）：基于银行业务经验生成
-3. 测试步骤（steps）：只保留贷款核算中心系统的步骤，排除外部系统（流程作业、资产调度平台等）
-4. 预期结果（expected_results）：与测试步骤一一对应
-5. 输出纯 JSON，无额外说明
+0. 保持与测试点语义一致，不要引入无关内容
+1. 若提供 manual_preconditions、manual_steps：作为参考，不要机械照搬；与测试点不一致时应调整
+2. 根据测试点文本判断正反例倾向，并据此调整预期结果表述（通过/不通过、成功/失败）
+3. 前提条件（preconditions）：基于银行业务经验生成
+4. 测试步骤（steps）：只保留贷款核算中心系统的步骤，排除外部系统（流程作业、资产调度平台等）
+5. 预期结果（expected_results）：与测试步骤一一对应
+6. steps/expected_results 输出为列表元素，不要添加序号或编号前缀
+7. 输出纯 JSON，无额外说明
 """
 
 RULE_CASE_FAST_PROMPT = """你是一个银行信贷业务测试专家，需要将业务规则测试点转换为可执行测试用例的核心部分。
 
-输入：JSON，包含 point_id、point_type、subtype、priority、text，flow_steps 为同一功能的业务流程步骤（可选）
+输入：JSON，包含 point_id、point_type、subtype、priority、text，flow_steps 为同一功能的业务流程步骤（可选），manual_preconditions 可选，flow_preconditions 可选
 输出：JSON，仅包含 preconditions、steps、expected_results 三个字段
 
 要求：
-1. 前提条件（preconditions）：统一使用"放款流程已发起、业务要素已录入"
+0. 保持与测试点语义一致，不要引入无关内容
+1. 若提供 manual_preconditions：优先使用；否则若提供 flow_preconditions：以其为参考进行归纳；无法推断再使用"放款流程已发起、业务要素已录入"
 2. 测试步骤（steps）：
    - 若有 flow_steps：在相关步骤中插入规则操作
    - 若无 flow_steps：使用默认格式"贷款核算中心进行[检查/处理内容]"
 3. 预期结果（expected_results）：
    - 正例：使用"检查通过，[成功行为]"或"[处理行为]成功"
    - 反例：使用"检查不通过，提示'[具体错误信息]'"或"[处理行为]失败"
-4. 输出纯 JSON，无额外说明
+4. steps/expected_results 输出为列表元素，不要添加序号或编号前缀
+5. 输出纯 JSON，无额外说明
 """
 
 RULE_CASE_STANDARD_PROMPT = """你是一个银行信贷业务测试专家，需要将业务规则测试点转换为可执行测试用例的核心部分。
 
-输入：JSON，包含 point_id、point_type、subtype、priority、text，flow_steps 为同一功能的业务流程步骤（可选）
+输入：JSON，包含 point_id、point_type、subtype、priority、text，flow_steps 为同一功能的业务流程步骤（可选），manual_preconditions 可选，flow_preconditions 可选
 输出：JSON，仅包含 preconditions、steps、expected_results 三个字段
 
 要求：
+0. 保持与测试点语义一致，不要引入无关内容
 1. 根据测试点文本判断正反例倾向，并据此调整预期结果表述（通过/不通过、成功/失败）
-2. 前提条件（preconditions）：统一使用"放款流程已发起、业务要素已录入"
+2. 若提供 manual_preconditions：优先使用；否则若提供 flow_preconditions：以其为参考进行归纳；无法推断再使用"放款流程已发起、业务要素已录入"
 3. 测试步骤（steps）：
    - 若为处理类规则且包含多个动作，拆分为列表形式
    - 若为检查类规则或单步处理，可为字符串或单元素列表
@@ -178,29 +187,17 @@ RULE_CASE_STANDARD_PROMPT = """你是一个银行信贷业务测试专家，需�
 4. 预期结果（expected_results）：
    - 正例：使用"检查通过，[成功行为]"或"[处理行为]成功"
    - 反例：使用"检查不通过，提示'[具体错误信息]'"或"[处理行为]失败"
-5. 输出纯 JSON，无额外说明
+5. steps/expected_results 输出为列表元素，不要添加序号或编号前缀
+6. 输出纯 JSON，无额外说明
 """
 
 PROCESS_CASE_BATCH_FAST_PROMPT = """你是一个银行信贷业务测试专家，需要将业务流程测试点转换为可执行测试用例的核心部分。
 
-输入：JSON 数组，每项包含 point_id、point_type、subtype、priority、text
+输入：JSON 数组，每项包含 point_id、point_type、subtype、priority、text，可选 manual_preconditions、manual_steps
 输出：严格 JSON 数组（顺序与输入一致），每项包含 point_id、preconditions、steps、expected_results
 
 要求：
-1. 前提条件（preconditions）：基于银行业务经验生成
-2. 测试步骤（steps）：只保留贷款核算中心系统的步骤，排除外部系统（流程作业、资产调度平台等）
-3. 预期结果（expected_results）：与测试步骤一一对应
-4. 输出纯 JSON，无额外说明，不要包含代码块标记
-5. 任何一项如果无法生成，也必须输出对应 point_id，并将三个数组输出为空数组 []
-"""
-
-PROCESS_CASE_BATCH_STANDARD_PROMPT = """你是一个银行信贷业务测试专家，需要将业务流程测试点转换为可执行测试用例的核心部分。
-
-输入：JSON 数组，每项包含 point_id、point_type、subtype、priority、text（subtype 可能不准确）
-输出：严格 JSON 数组（顺序与输入一致），每项包含 point_id、preconditions、steps、expected_results
-
-要求：
-1. 根据测试点文本判断正反例倾向，并据此调整预期结果表述（通过/不通过、成功/失败）
+1. 若提供 manual_preconditions、manual_steps：优先参考并与其保持一致，可在不冲突的前提下补充
 2. 前提条件（preconditions）：基于银行业务经验生成
 3. 测试步骤（steps）：只保留贷款核算中心系统的步骤，排除外部系统（流程作业、资产调度平台等）
 4. 预期结果（expected_results）：与测试步骤一一对应
@@ -208,31 +205,49 @@ PROCESS_CASE_BATCH_STANDARD_PROMPT = """你是一个银行信贷业务测试专�
 6. 任何一项如果无法生成，也必须输出对应 point_id，并将三个数组输出为空数组 []
 """
 
-RULE_CASE_BATCH_FAST_PROMPT = """你是一个银行信贷业务测试专家，需要将业务规则测试点转换为可执行测试用例的核心部分。
+PROCESS_CASE_BATCH_STANDARD_PROMPT = """你是一个银行信贷业务测试专家，需要将业务流程测试点转换为可执行测试用例的核心部分。
 
-输入：JSON 数组，每项包含 point_id、point_type、subtype、priority、text、flow_steps（同一功能的流程步骤，可为空）
+输入：JSON 数组，每项包含 point_id、point_type、subtype、priority、text（subtype 可能不准确），可选 manual_preconditions、manual_steps
 输出：严格 JSON 数组（顺序与输入一致），每项包含 point_id、preconditions、steps、expected_results
 
 要求：
-1. 前提条件（preconditions）：统一使用"放款流程已发起、业务要素已录入"
+1. 若提供 manual_preconditions、manual_steps：优先参考并与其保持一致，可在不冲突的前提下补充
+2. 根据测试点文本判断正反例倾向，并据此调整预期结果表述（通过/不通过、成功/失败）
+3. 前提条件（preconditions）：基于银行业务经验生成
+4. 测试步骤（steps）：只保留贷款核算中心系统的步骤，排除外部系统（流程作业、资产调度平台等）
+5. 预期结果（expected_results）：与测试步骤一一对应
+6. 输出纯 JSON，无额外说明，不要包含代码块标记
+7. 任何一项如果无法生成，也必须输出对应 point_id，并将三个数组输出为空数组 []
+"""
+
+RULE_CASE_BATCH_FAST_PROMPT = """你是一个银行信贷业务测试专家，需要将业务规则测试点转换为可执行测试用例的核心部分。
+
+输入：JSON 数组，每项包含 point_id、point_type、subtype、priority、text、flow_steps（同一功能的流程步骤，可为空），manual_preconditions 可选，flow_preconditions 可选
+输出：严格 JSON 数组（顺序与输入一致），每项包含 point_id、preconditions、steps、expected_results
+
+要求：
+0. 保持与测试点语义一致，不要引入无关内容
+1. 若提供 manual_preconditions：优先使用；否则若提供 flow_preconditions：以其为参考进行归纳；无法推断再使用"放款流程已发起、业务要素已录入"
 2. 测试步骤（steps）：
    - 若有 flow_steps：在相关步骤中插入规则操作
    - 若无 flow_steps：使用默认格式"贷款核算中心进行[检查/处理内容]"
 3. 预期结果（expected_results）：
    - 正例：使用"检查通过，[成功行为]"或"[处理行为]成功"
    - 反例：使用"检查不通过，提示'[具体错误信息]'"或"[处理行为]失败"
-4. 输出纯 JSON，无额外说明，不要包含代码块标记
+4. steps/expected_results 输出为列表元素，不要添加序号或编号前缀
+5. 输出纯 JSON，无额外说明，不要包含代码块标记
 5. 任何一项如果无法生成，也必须输出对应 point_id，并将三个数组输出为空数组 []
 """
 
 RULE_CASE_BATCH_STANDARD_PROMPT = """你是一个银行信贷业务测试专家，需要将业务规则测试点转换为可执行测试用例的核心部分。
 
-输入：JSON 数组，每项包含 point_id、point_type、subtype、priority、text、flow_steps（同一功能的流程步骤，可为空）
+输入：JSON 数组，每项包含 point_id、point_type、subtype、priority、text、flow_steps（同一功能的流程步骤，可为空），manual_preconditions 可选，flow_preconditions 可选
 输出：严格 JSON 数组（顺序与输入一致），每项包含 point_id、preconditions、steps、expected_results
 
 要求：
+0. 保持与测试点语义一致，不要引入无关内容
 1. 根据测试点文本判断正反例倾向，并据此调整预期结果表述（通过/不通过、成功/失败）
-2. 前提条件（preconditions）：统一使用"放款流程已发起、业务要素已录入"
+2. 若提供 manual_preconditions：优先使用；否则若提供 flow_preconditions：以其为参考进行归纳；无法推断再使用"放款流程已发起、业务要素已录入"
 3. 测试步骤（steps）：
    - 若为处理类规则且包含多个动作，拆分为列表形式
    - 若为检查类规则或单步处理，可为字符串或单元素列表
@@ -241,7 +256,8 @@ RULE_CASE_BATCH_STANDARD_PROMPT = """你是一个银行信贷业务测试专家�
 4. 预期结果（expected_results）：
    - 正例：使用"检查通过，[成功行为]"或"[处理行为]成功"
    - 反例：使用"检查不通过，提示'[具体错误信息]'"或"[处理行为]失败"
-5. 输出纯 JSON，无额外说明，不要包含代码块标记
+5. steps/expected_results 输出为列表元素，不要添加序号或编号前缀
+6. 输出纯 JSON，无额外说明，不要包含代码块标记
 6. 任何一项如果无法生成，也必须输出对应 point_id，并将三个数组输出为空数组 []
 """
 

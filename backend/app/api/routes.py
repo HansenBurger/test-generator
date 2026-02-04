@@ -555,7 +555,7 @@ async def get_versions(requirement_name: str):
 async def preview_generate(request: PreviewGenerateRequest):
     """预生成测试用例"""
     try:
-        preview_id, cases, token_usage, logs = case_generation_manager.generate_preview(
+        preview_id, cases, token_usage, logs, total, preview_count, remaining_count = case_generation_manager.generate_preview(
             request.parse_id,
             request.count
         )
@@ -566,7 +566,10 @@ async def preview_generate(request: PreviewGenerateRequest):
             success=True,
             message="预生成完成",
             preview_id=preview_id,
-            cases=cases
+            cases=cases,
+            total=total,
+            preview_count=preview_count,
+            remaining_count=remaining_count
         )
     except Exception as exc:
         api_logger.error(f"预生成失败 - 错误: {str(exc)}", exc_info=True)

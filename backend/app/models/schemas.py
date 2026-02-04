@@ -181,6 +181,9 @@ class PreviewGenerateResponse(BaseModel):
     message: str
     preview_id: Optional[str] = None
     cases: List[TestCase] = []
+    total: Optional[int] = None
+    preview_count: Optional[int] = None
+    remaining_count: Optional[int] = None
 
 
 class ConfirmPreviewRequest(BaseModel):
