@@ -164,10 +164,7 @@ class CaseXMindGenerator:
         for point in self._points:
             segments = self._split_context(point.context)
             segments = self._strip_root(segments)
-            if not segments:
-                continue
-            if segments[-1] in ("业务流程", "业务规则", "页面控制"):
-                segments = segments[:-1]
+            segments = self._strip_leaf_and_alias(segments)
             if not segments:
                 continue
             segments = self._collapse_modeling_path(segments)
@@ -194,6 +191,7 @@ class CaseXMindGenerator:
         for point in self._points:
             segments = self._split_context(point.context)
             segments = self._strip_root(segments)
+            segments = self._strip_leaf_and_alias(segments)
             if not segments:
                 top = requirement
             else:
@@ -226,7 +224,9 @@ class CaseXMindGenerator:
             branch = self._find_leaf_node(parent, point.point_type)
             if branch is None:
                 continue
-            if self._add_case_node(branch, point, case):
+            alias = self._extract_rule_alias(point.context)
+            target_parent = self._ensure_rule_alias_node(branch, alias) if alias else branch
+            if self._add_case_node(target_parent, point, case):
                 added += 1
 
 
@@ -240,14 +240,9 @@ class CaseXMindGenerator:
     ) -> bool:
         segments = self._split_context(context_override or point.context)
         segments = self._strip_root(segments)
-        if not segments:
+        path, leaf, _ = self._parse_context_path(segments)
+        if not leaf:
             return False
-        if segments[-1] in ("业务流程", "业务规则", "页面控制"):
-            leaf = segments[-1]
-            path = segments[:-1]
-        else:
-            leaf = ""
-            path = segments
         if point.point_type == "process" and leaf != "业务流程":
             return False
         if point.point_type == "rule" and leaf != "业务规则":
@@ -265,6 +260,45 @@ class CaseXMindGenerator:
         if path and path[0] == requirement and len(path) >= 2:
             return path[1] == top
         return path and path[0] == top or top in path
+
+    def _parse_context_path(self, segments: List[str]) -> tuple[List[str], str, Optional[str]]:
+        if not segments:
+            return [], "", None
+        leaf_index = None
+        for idx in range(len(segments) - 1, -1, -1):
+            if segments[idx] in ("业务流程", "业务规则", "页面控制"):
+                leaf_index = idx
+                break
+        if leaf_index is None:
+            return segments, "", None
+        leaf = segments[leaf_index]
+        alias = segments[leaf_index + 1] if leaf_index + 1 < len(segments) else None
+        path = segments[:leaf_index]
+        return path, leaf, alias
+
+    def _strip_leaf_and_alias(self, segments: List[str]) -> List[str]:
+        path, leaf, alias = self._parse_context_path(segments)
+        if not leaf:
+            return segments
+        return path
+
+    def _extract_rule_alias(self, context: Optional[str]) -> Optional[str]:
+        if not context:
+            return None
+        segments = self._split_context(context)
+        segments = self._strip_root(segments)
+        _, _, alias = self._parse_context_path(segments)
+        return alias
+
+    def _ensure_rule_alias_node(self, parent: ET.Element, alias: Optional[str]) -> ET.Element:
+        if not alias:
+            return parent
+        topics = self._ensure_child_topics(parent)
+        for topic in topics.findall("topic"):
+            title = topic.find("title")
+            if title is not None and title.text == alias:
+                return topic
+        return self._create_topic(topics, alias, marker_id="c_symbol_contact")
 
     def _find_leaf_node(self, parent: ET.Element, point_type: str) -> Optional[ET.Element]:
         children = parent.find("children")

@@ -225,7 +225,8 @@
               v-model="sessionIdInput"
               placeholder="请输入 session_id"
               clearable
-              style="max-width: 420px"
+              class="session-input"
+              :title="sessionIdInput"
             />
             <el-button type="primary" :loading="sessionExportLoading" @click="handleExportBySession">
               导出XMind
@@ -270,6 +271,30 @@ const sessionIdInput = ref('')
 const sessionExportLoading = ref(false)
 
 let pollTimer = null
+
+const formatProgressMessage = (status) => {
+  if (!status) {
+    return '生成处理中，请稍后再试'
+  }
+  const percentage = Math.round((status.progress || 0) * 100)
+  const completed = status.completed || 0
+  const total = status.total || 0
+  return `生成处理中：${completed}/${total}（${percentage}%）`
+}
+
+const ensureSessionCompleted = async (sessionId) => {
+  const status = await getGenerationStatusBySession(sessionId)
+  generationStatus.value = status
+  if (status?.status === 'completed') {
+    return true
+  }
+  if (status?.status === 'failed') {
+    ElMessage.error(status.error || '生成失败')
+    return false
+  }
+  ElMessage.warning(formatProgressMessage(status))
+  return false
+}
 
 const handleFileChange = (file, files) => {
   fileList.value = files || []
@@ -447,6 +472,10 @@ const handleExport = async () => {
   exportLoading.value = true
   try {
     if (currentSessionId.value) {
+      const ready = await ensureSessionCompleted(currentSessionId.value)
+      if (!ready) {
+        return
+      }
       const response = await exportCasesBySessionWithHeaders(currentSessionId.value)
       const blob = response.data
       const filename = resolveDownloadName(
@@ -490,7 +519,12 @@ const handleExportBySession = async () => {
   }
   sessionExportLoading.value = true
   try {
-    const response = await exportCasesBySessionWithHeaders(sessionIdInput.value.trim())
+    const sessionId = sessionIdInput.value.trim()
+    const ready = await ensureSessionCompleted(sessionId)
+    if (!ready) {
+      return
+    }
+    const response = await exportCasesBySessionWithHeaders(sessionId)
     const blob = response.data
     const filename = resolveDownloadName(
       response.headers?.['content-disposition'],
@@ -626,6 +660,17 @@ const formatTimestamp = () => {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.session-input {
+  flex: 0 0 420px;
+  max-width: 420px;
+}
+
+.session-input :deep(.el-input__inner) {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .progress-meta {

@@ -29,9 +29,15 @@ class XMindParser:
         content_xml = self._read_content_xml()
         root = ET.fromstring(content_xml)
 
-        sheet = root.find("x:sheet", self._NS)
-        if sheet is None:
+        sheets = root.findall("x:sheet", self._NS)
+        if not sheets:
             raise ValueError("XMind文件解析失败：未找到sheet节点")
+        if len(sheets) > 1:
+            sheet_titles = [self._get_sheet_title(sheet, idx + 1) for idx, sheet in enumerate(sheets)]
+            title_list = "、".join(sheet_titles)
+            raise ValueError(f"检测到多个画布，仅支持单画布解析：{title_list}")
+
+        sheet = sheets[0]
 
         root_topic = sheet.find("x:topic", self._NS)
         if root_topic is None:
@@ -87,6 +93,13 @@ class XMindParser:
             return ""
         return title_elem.text.strip()
 
+    def _get_sheet_title(self, sheet: ET.Element, index: int) -> str:
+        title_elem = sheet.find("x:title", self._NS)
+        if title_elem is None or title_elem.text is None:
+            return f"未命名画布{index}"
+        title = title_elem.text.strip()
+        return title or f"未命名画布{index}"
+
     def _get_children(self, topic: ET.Element) -> List[ET.Element]:
         children = topic.find("x:children", self._NS)
         if children is None:
@@ -95,6 +108,12 @@ class XMindParser:
         if topics is None:
             return []
         return topics.findall("x:topic", self._NS)
+
+    def _get_effective_children(self, topic: ET.Element, point_type: str) -> List[ET.Element]:
+        children = [child for child in self._get_children(topic) if self._get_title(child)]
+        if point_type not in ("page_control", "rule"):
+            return children
+        return [child for child in children if not self._is_placeholder_title(self._get_title(child))]
 
     def _traverse_topics(
         self,
@@ -112,6 +131,20 @@ class XMindParser:
             context = self._build_context(current_path)
             point_type = self._SECTION_TYPES.get(title, "rule")
             for child in self._get_children(topic):
+                if self._is_rule_alias(child):
+                    alias_title = self._get_title(child)
+                    if not alias_title:
+                        continue
+                    alias_context = self._build_context(current_path + [alias_title])
+                    for alias_child in self._get_children(child):
+                        self._parse_test_point(
+                            alias_child,
+                            point_type,
+                            alias_context,
+                            points,
+                            depth_offset=1
+                        )
+                    continue
                 self._parse_test_point(child, point_type, context, points)
             return
 
@@ -182,6 +215,12 @@ class XMindParser:
             return 0
         return 1 + max(self._max_depth(child) for child in children)
 
+    def _max_effective_depth(self, topic: ET.Element, point_type: str) -> int:
+        children = self._get_effective_children(topic, point_type)
+        if not children:
+            return 0
+        return 1 + max(self._max_effective_depth(child, point_type) for child in children)
+
     def _has_wrong_marker(self, topic: ET.Element) -> bool:
         for elem in topic.iter():
             tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
@@ -194,6 +233,27 @@ class XMindParser:
         if marker_attr:
             return "symbol-wrong" in {m.strip() for m in marker_attr.split(",") if m.strip()}
         return False
+
+    def _has_contact_marker(self, topic: ET.Element) -> bool:
+        for elem in topic.iter():
+            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if tag != "marker-ref":
+                continue
+            marker_id = (elem.attrib.get("marker-id", "") or "").lower()
+            if "contact" in marker_id:
+                return True
+        marker_attr = topic.attrib.get("markers", "")
+        if marker_attr:
+            for marker_id in [m.strip().lower() for m in marker_attr.split(",") if m.strip()]:
+                if "contact" in marker_id:
+                    return True
+        return False
+
+    def _is_rule_alias(self, topic: ET.Element) -> bool:
+        title = self._get_title(topic)
+        if not title:
+            return False
+        return self._has_contact_marker(topic)
 
     def _append_point(
         self,
@@ -228,24 +288,28 @@ class XMindParser:
         node: ET.Element,
         point_type: str,
         context: str,
-        points: List[TestPoint]
+        points: List[TestPoint],
+        depth_offset: int = 0
     ):
         node_title = self._get_title(node)
         if not node_title:
             return
         priority, cleaned_title = self._parse_priority(node, node_title)
-        children = [child for child in self._get_children(node) if self._get_title(child)]
-        depth = self._max_depth(node)
-        if depth > 3:
+        if point_type in ("page_control", "rule") and self._is_placeholder_title(cleaned_title):
+            return
+        children = self._get_effective_children(node, point_type)
+        depth = self._max_effective_depth(node, point_type)
+        effective_depth = max(depth - depth_offset, 0)
+        if effective_depth > 3:
             return
 
-        if depth == 0 or not children:
+        if effective_depth == 0 or not children:
             subtype = self._detect_subtype(cleaned_title)
             self._append_point(points, point_type, priority, subtype, context, cleaned_title)
             self._total_count += 1
             return
 
-        if depth == 1:
+        if effective_depth == 1:
             for child in children:
                 child_title = self._get_title(child)
                 if not child_title:
@@ -258,7 +322,7 @@ class XMindParser:
             self._total_count += len(children)
             return
 
-        if len(children) > 1 and depth >= 2:
+        if len(children) > 1 and effective_depth >= 2:
             chains = []
             for child in children:
                 child_title = self._get_title(child)
@@ -266,7 +330,7 @@ class XMindParser:
                     chains = []
                     break
                 child_priority, child_cleaned = self._parse_priority(child, child_title)
-                depth2_nodes = [n for n in self._get_children(child) if self._get_title(n)]
+                depth2_nodes = self._get_effective_children(child, point_type)
                 if len(depth2_nodes) != 1:
                     chains = []
                     break
@@ -275,7 +339,7 @@ class XMindParser:
                 if not depth2_title:
                     chains = []
                     break
-                depth3_nodes = [n for n in self._get_children(depth2_node) if self._get_title(n)]
+                depth3_nodes = self._get_effective_children(depth2_node, point_type)
                 if len(depth3_nodes) != 1:
                     chains = []
                     break
@@ -322,9 +386,9 @@ class XMindParser:
             return
         depth1_priority, depth1_cleaned = self._parse_priority(depth1_node, depth1_title)
         base_title = self._merge_titles(cleaned_title, depth1_cleaned)
-        depth2_nodes = [child for child in self._get_children(depth1_node) if self._get_title(child)]
+        depth2_nodes = self._get_effective_children(depth1_node, point_type)
 
-        if depth == 2:
+        if effective_depth == 2:
             if not depth2_nodes:
                 subtype = self._detect_subtype(cleaned_title)
                 self._append_point(points, point_type, priority, subtype, context, cleaned_title)
@@ -354,7 +418,7 @@ class XMindParser:
             self._append_point(points, point_type, priority, subtype, context, cleaned_title)
             self._total_count += 1
             return
-        depth3_nodes = [child for child in self._get_children(depth2_node) if self._get_title(child)]
+        depth3_nodes = self._get_effective_children(depth2_node, point_type)
         if len(depth3_nodes) != 1:
             subtype = self._detect_subtype(cleaned_title)
             self._append_point(points, point_type, priority, subtype, context, cleaned_title)
@@ -441,6 +505,12 @@ class XMindParser:
         if has_positive:
             return "positive"
         return None
+
+    def _is_placeholder_title(self, title: str) -> bool:
+        if title is None:
+            return True
+        cleaned = title.strip()
+        return cleaned == "/" or cleaned == "／"
 
     def _build_stats(self, points: List[TestPoint], total_override: Optional[int] = None) -> dict:
         stats = {
