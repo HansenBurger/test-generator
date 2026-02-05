@@ -10,6 +10,8 @@ from docx import Document
 from docx.document import Document as DocumentType
 from docx.table import Table
 from docx.text.paragraph import Paragraph
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
 
 from app.models.schemas import (
     ParsedDocument, RequirementInfo, ActivityInfo, ComponentInfo,
@@ -594,35 +596,53 @@ class DocumentParser:
     def _extract_requirement_info(self) -> RequirementInfo:
         """提取需求用例基本信息"""
         info = RequirementInfo(case_name="")
-        
-        # 查找包含"需求用例概述"的段落，然后查找下面的表格
+        # 查找包含"需求用例概述"的段落，然后查找其后紧邻的表格
         found_overview = False
-        for i, para in enumerate(self.paragraphs):
-            text = para.text.strip()
-            if "需求用例概述" in text and "（A阶段）" in text:
-                found_overview = True
-                # 查找后续的表格
-                for table in self.tables:
-                    if len(table.rows) < 1:
-                        continue
-                    
-                    # 检查表格是否包含"用例名称"
-                    first_row_text = ' '.join([cell.text.strip() for cell in table.rows[0].cells])
-                    if "用例名称" in first_row_text:
-                        # 解析表格内容
-                        self._parse_requirement_table(table, info)
-                        break
+        for block in self._iter_block_items():
+            if isinstance(block, Paragraph):
+                text = block.text.strip()
+                if "需求用例概述" in text:
+                    found_overview = True
+                continue
+            
+            if found_overview and isinstance(block, Table):
+                header_row_idx = self._find_requirement_header_row(block)
+                if header_row_idx is not None:
+                    self._parse_requirement_table(block, info, header_row_idx)
+                    return info
+        
+        # 回退：如果未按顺序找到，扫描所有表格
+        for table in self.tables:
+            header_row_idx = self._find_requirement_header_row(table)
+            if header_row_idx is not None:
+                self._parse_requirement_table(table, info, header_row_idx)
                 break
         
         return info
+
+    def _iter_block_items(self):
+        """按文档顺序迭代段落和表格"""
+        for child in self.doc.element.body.iterchildren():
+            if isinstance(child, CT_P):
+                yield Paragraph(child, self.doc)
+            elif isinstance(child, CT_Tbl):
+                yield Table(child, self.doc)
+
+    def _find_requirement_header_row(self, table: Table) -> Optional[int]:
+        """查找包含'用例名称'的表头行索引"""
+        for idx, row in enumerate(table.rows):
+            row_text = " ".join(cell.text.strip() for cell in row.cells)
+            if "用例名称" in row_text:
+                return idx
+        return None
     
-    def _parse_requirement_table(self, table: Table, info: RequirementInfo):
+    def _parse_requirement_table(self, table: Table, info: RequirementInfo, header_row_idx: int = 0):
         """解析需求用例概述表格"""
-        if len(table.rows) < 1:
+        if len(table.rows) < 1 or header_row_idx >= len(table.rows):
             return
         
         # 获取表头
-        header_row = table.rows[0]
+        header_row = table.rows[header_row_idx]
         headers = [cell.text.strip() for cell in header_row.cells]
         
         # 特殊处理：如果表头中"用例名称"后面直接跟着值（如：['用例名称', '管理特色互联网贷款账单', ...]）
@@ -642,8 +662,9 @@ class DocumentParser:
         partner_idx = self._find_column_index(headers, ["合作方（P）", "P合作方（P）", "合作方"])
         
         # 解析数据行（可能是横向布局：第一行是表头，第二行是值）
-        if len(table.rows) >= 2:
-            value_row = table.rows[1]
+        value_row_idx = header_row_idx + 1
+        if len(table.rows) > value_row_idx:
+            value_row = table.rows[value_row_idx]
             values = [cell.text.strip() for cell in value_row.cells]
             
             if channel_idx >= 0 and channel_idx < len(values):
@@ -667,7 +688,7 @@ class DocumentParser:
                     info.partner = value
         
         # 也尝试纵向布局：第一列是键，第二列是值
-        for row in table.rows[1:]:
+        for row in table.rows[header_row_idx:]:
             if len(row.cells) >= 2:
                 key = row.cells[0].text.strip()
                 value = row.cells[1].text.strip()
@@ -685,12 +706,12 @@ class DocumentParser:
                         info.partner = value
     
     def _extract_activity_name(self) -> Optional[str]:
-        """提取活动名称：从'# 任务设计*（A阶段）'部分提取第一个子标题"""
+        """提取活动名称：从'# 任务设计'部分提取第一个子标题"""
         for i, para in enumerate(self.paragraphs):
             text = para.text.strip()
             
-            # 查找"任务设计*（A阶段）"标题（一级标题）
-            if "任务设计" in text and "（A阶段）" in text:
+            # 查找"任务设计"标题（一级标题）
+            if "任务设计" in text:
                 # 检查是否是标题样式（Heading 1）
                 if self._is_heading(para, level=1):
                     # 查找下一个二级标题（##级别）
@@ -702,23 +723,20 @@ class DocumentParser:
                         if self._is_heading(next_para, level=1) and "任务设计" not in next_text:
                             break
                         
-                        # 检查是否是二级标题且包含"（A阶段）"
+                        # 检查是否是二级标题
                         if self._is_heading(next_para, level=2):
-                            # 匹配模式：活动名称*（A阶段）
-                            match = re.match(r"(.+?)\*?（A阶段）", next_text)
-                            if match:
-                                activity_name = match.group(1).strip()
-                                # 排除特定关键词
-                                exclude_keywords = ["需求用例概述", "活动任务图", "业务流程图", 
-                                                   "任务设计", "业务步骤/功能描述", "规则说明",
-                                                   "任务清单", "任务流程图", "流程描述"]
-                                if activity_name not in exclude_keywords:
-                                    return activity_name
+                            activity_name = self._strip_phase_suffix(next_text)
+                            # 排除特定关键词
+                            exclude_keywords = ["需求用例概述", "活动任务图", "业务流程图", 
+                                               "任务设计", "业务步骤/功能描述", "规则说明",
+                                               "任务清单", "任务流程图", "流程描述"]
+                            if activity_name and activity_name not in exclude_keywords:
+                                return activity_name
         
         return None
     
     def _extract_all_components(self) -> List[ComponentInfo]:
-        """提取所有组件、任务、步骤信息：从'# 任务规则说明*（A阶段、B阶段）'部分提取"""
+        """提取所有组件、任务、步骤信息：从'# 任务规则说明'部分提取"""
         components = []
         exclude_keywords = ["任务规则说明", "输入输出", "业务流程", "业务规则",
                            "页面控制", "数据验证", "前置条件", "后置条件",
@@ -728,8 +746,8 @@ class DocumentParser:
         for i, para in enumerate(self.paragraphs):
             text = para.text.strip()
             
-            # 查找"任务规则说明*（A阶段、B阶段）"标题（一级标题）
-            if "任务规则说明" in text and "（A阶段、B阶段）" in text:
+            # 查找"任务规则说明"标题（一级标题）
+            if "任务规则说明" in text:
                 if self._is_heading(para, level=1):
                     # 首先找到搜索的结束位置（下一个一级标题）
                     end_index = len(self.paragraphs)  # 默认到文档末尾
@@ -750,14 +768,12 @@ class DocumentParser:
                         
                         # 检查是否是二级标题（组件名称）
                         if self._is_heading(next_para, level=2):
-                            match = re.match(r"(.+?)\*?（A阶段、B阶段）", next_text)
-                            if match:
-                                component_name = match.group(1).strip()
-                                if component_name not in exclude_keywords:
-                                    # 提取该组件下的所有任务
-                                    tasks = self._extract_tasks(j + 1, component_name, exclude_keywords)
-                                    component = ComponentInfo(name=component_name, tasks=tasks)
-                                    components.append(component)
+                            component_name = self._strip_phase_suffix(next_text)
+                            if component_name and component_name not in exclude_keywords:
+                                # 提取该组件下的所有任务
+                                tasks = self._extract_tasks(j + 1, component_name, exclude_keywords)
+                                component = ComponentInfo(name=component_name, tasks=tasks)
+                                components.append(component)
         
         return components
     
@@ -793,19 +809,17 @@ class DocumentParser:
             
             # 检查是否是三级标题（任务名称）
             if self._is_heading(para, level=3):
-                match = re.match(r"(.+?)\*?（A阶段、B阶段）", text)
-                if match:
-                    task_name = match.group(1).strip()
-                    if task_name not in exclude_keywords:
-                        # 保存上一个任务
-                        if current_task:
-                            tasks.append(current_task)
-                        
-                        # 创建新任务
-                        current_task = TaskInfo(name=task_name, steps=[])
-                        # 提取该任务下的所有步骤
-                        steps = self._extract_steps(i + 1, task_name, exclude_keywords)
-                        current_task.steps = steps
+                task_name = self._strip_phase_suffix(text)
+                if task_name and task_name not in exclude_keywords:
+                    # 保存上一个任务
+                    if current_task:
+                        tasks.append(current_task)
+                    
+                    # 创建新任务
+                    current_task = TaskInfo(name=task_name, steps=[])
+                    # 提取该任务下的所有步骤
+                    steps = self._extract_steps(i + 1, task_name, exclude_keywords)
+                    current_task.steps = steps
         
         # 添加最后一个任务
         if current_task:
@@ -851,17 +865,15 @@ class DocumentParser:
             # 检查是否是四级标题（步骤名称）
             if self._is_heading(para, level=4):
                 # 提取章节序号（如4.1.1.20）
-                step_number_match = re.match(r"(\d+\.\d+\.\d+\.\d+)\.?\s*(.+?)\*?（A阶段、B阶段）", text)
+                step_number_match = re.match(r"(\d+\.\d+\.\d+\.\d+)\.?\s*(.+)", text)
                 if step_number_match:
                     step_number = step_number_match.group(1)  # 如"4.1.1.20"
-                    step_name = step_number_match.group(2).strip()
+                    step_name = self._strip_phase_suffix(step_number_match.group(2).strip())
                 else:
                     # 如果没有章节序号，尝试只匹配步骤名称
-                    match = re.match(r"(.+?)\*?（A阶段、B阶段）", text)
-                    if match:
-                        step_number = None
-                        step_name = match.group(1).strip()
-                    else:
+                    step_number = None
+                    step_name = self._strip_phase_suffix(text)
+                    if not step_name:
                         continue
                 
                 if step_name not in exclude_keywords:
@@ -947,13 +959,13 @@ class DocumentParser:
                 para = self.paragraphs[i]
                 text = para.text.strip()
                 
-                if "输入输出" in text and "（A阶段、B阶段）" in text:
+                if "输入输出" in text:
                     if self._is_heading(para, level=5):
                         input_output_found = True
                         input_output_index = i
                         parser_logger.debug(f"找到输入输出子章节（通用匹配）: 索引 {i}, 文本: {repr(text)}")
                         break
-        
+
         # 确定搜索范围 - 文档末尾使用绝对位置计算
         if input_output_found:
             # 如果找到了"输入输出"子章节，在该章节范围内搜索
@@ -2947,3 +2959,7 @@ class DocumentParser:
             output_elements = []
         
         return input_elements, output_elements
+
+    def _strip_phase_suffix(self, text: str) -> str:
+        """移除标题中可能存在的阶段后缀，如'（A阶段）'、'（A阶段、B阶段）'"""
+        return re.sub(r"\*?（[^）]*阶段[^）]*）\s*$", "", text).strip()
