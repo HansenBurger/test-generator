@@ -22,6 +22,7 @@ from app.services.prompts import (
     SYSTEM_PROMPT_METADATA,
     SYSTEM_PROMPT_METADATA_BATCH,
     SYSTEM_PROMPT_METADATA_STRICT,
+    PROCESS_POINT_SUMMARY_PROMPT,
     RULE_GROUPING_PROMPT,
     get_case_prompt,
     get_case_batch_prompt
@@ -42,6 +43,7 @@ RULE_GROUP_WEIGHT_CONTEXT = float(_os.getenv("RULE_GROUP_WEIGHT_CONTEXT", "2.0")
 RULE_GROUP_WEIGHT_KEY = float(_os.getenv("RULE_GROUP_WEIGHT_KEY", "1.0") or 1.0)
 METADATA_BATCH_SIZE = 10
 METADATA_BATCH_CONCURRENCY = int(_os.getenv("METADATA_BATCH_CONCURRENCY", "3") or 3)
+PROCESS_SUMMARY_BATCH_SIZE = int(_os.getenv("PROCESS_SUMMARY_BATCH_SIZE", "10") or 10)
 
 
 def detect_subtype(text: str) -> Optional[str]:
@@ -493,6 +495,43 @@ class CaseGenerator:
                     point.priority = point.priority or meta.get("priority")
         return token_usage, logs
 
+    def summarize_process_points(
+        self,
+        points: List[TestPoint]
+    ) -> Tuple[Dict[str, str], int, List[str]]:
+        process_points = [p for p in points if p.point_type == "process"]
+        if not process_points:
+            return {}, 0, []
+        token_usage = 0
+        logs: List[str] = []
+        summary_map: Dict[str, str] = {}
+        batches = _chunk_list(process_points, PROCESS_SUMMARY_BATCH_SIZE)
+        for batch in batches:
+            payload = [{"point_id": p.point_id, "text": p.text} for p in batch]
+            try:
+                result, tokens = self._client.chat_json(
+                    system_prompt=PROCESS_POINT_SUMMARY_PROMPT,
+                    user_prompt=json.dumps(payload, ensure_ascii=False),
+                    temperature=0.1,
+                    max_tokens=800
+                )
+                token_usage += tokens
+                if not isinstance(result, list):
+                    logs.append("流程概括返回格式异常，非数组")
+                    continue
+                for item in result:
+                    if not isinstance(item, dict):
+                        continue
+                    point_id = str(item.get("point_id"))
+                    summary = (item.get("summary") or "").strip()
+                    if point_id and summary:
+                        summary_map[point_id] = summary
+            except Exception as exc:
+                logs.append(f"流程概括失败：{str(exc)}")
+        if summary_map:
+            logs.append(f"流程概括完成：覆盖 {len(summary_map)} 条")
+        return summary_map, token_usage, logs
+
     def group_rule_points_by_relevance(
         self,
         points: List[TestPoint],
@@ -569,7 +608,8 @@ class CaseGenerator:
         strategy: str = "standard",
         prompt_examples: Optional[Dict[str, str]] = None,
         manual_templates_map: Optional[Dict[str, Dict[str, List[str]]]] = None,
-        flow_preconditions_map: Optional[Dict[str, List[str]]] = None
+        flow_preconditions_map: Optional[Dict[str, List[str]]] = None,
+        summary_map: Optional[Dict[str, str]] = None
     ) -> Tuple[TestCase, int]:
         temperature = 0.2 if strategy == "standard" else 0.6
         max_tokens = 900 if strategy == "standard" else 600
@@ -590,7 +630,7 @@ class CaseGenerator:
             point_type=point.point_type,
             subtype=point.subtype,
             priority=point.priority,
-            text=point.text,
+            text=summary_map.get(point.point_id, point.text) if summary_map else point.text,
             preconditions=_normalize_list(result.get("preconditions")),
             steps=_normalize_list(result.get("steps")),
             expected_results=_normalize_list(result.get("expected_results"))
@@ -606,7 +646,8 @@ class CaseGenerator:
         enable_batch: bool = False,
         prompt_examples: Optional[Dict[str, str]] = None,
         manual_templates_map: Optional[Dict[str, Dict[str, List[str]]]] = None,
-        flow_preconditions_map: Optional[Dict[str, List[str]]] = None
+        flow_preconditions_map: Optional[Dict[str, List[str]]] = None,
+        summary_map: Optional[Dict[str, str]] = None
     ) -> Tuple[List[TestCase], int, List[str]]:
         if not enable_batch:
             cases: List[TestCase] = []
@@ -620,7 +661,8 @@ class CaseGenerator:
                         strategy,
                         prompt_examples=prompt_examples,
                         manual_templates_map=manual_templates_map,
-                        flow_preconditions_map=flow_preconditions_map
+                        flow_preconditions_map=flow_preconditions_map,
+                        summary_map=summary_map
                     )
                     cases.append(case)
                     token_usage += tokens
@@ -737,7 +779,7 @@ class CaseGenerator:
                 point_type=point.point_type,
                 subtype=point.subtype,
                 priority=point.priority,
-                text=point.text,
+                text=summary_map.get(point.point_id, point.text) if summary_map else point.text,
                 preconditions=_normalize_list(item.get("preconditions")),
                 steps=_normalize_list(item.get("steps")),
                 expected_results=_normalize_list(item.get("expected_results"))
@@ -858,6 +900,10 @@ class CaseGenerationManager:
         remaining_count = max(0, total_count - preview_count)
         manual_templates_map = _build_manual_templates(parsed.test_points)
 
+        summary_map, summary_tokens, summary_logs = self._generator.summarize_process_points(selected_points)
+        token_usage += summary_tokens
+        logs.extend(summary_logs)
+
         cases: List[TestCase] = []
         for point in selected_points:
             if point.manual_case:
@@ -866,7 +912,8 @@ class CaseGenerationManager:
             case, tokens = self._generator.generate_case(
                 point,
                 "standard",
-                manual_templates_map=manual_templates_map
+                manual_templates_map=manual_templates_map,
+                summary_map=summary_map
             )
             cases.append(case)
             token_usage += tokens
@@ -1063,6 +1110,10 @@ class CaseGenerationManager:
                 if preconditions:
                     flow_preconditions_map.setdefault(key, []).extend(preconditions)
 
+            summary_map, summary_tokens, summary_logs = self._generator.summarize_process_points(ai_points)
+            task.token_usage += summary_tokens
+            task.logs.extend(summary_logs)
+
             if process_points:
                 process_batches = _chunk_list(process_points, BATCH_SIZE)
                 task.logs.append(f"阶段：流程用例生成，共 {len(process_points)} 条，批次数 {len(process_batches)}")
@@ -1076,7 +1127,8 @@ class CaseGenerationManager:
                     task.strategy,
                     enable_batch=ENABLE_PROCESS_BATCH,
                     prompt_examples=task.prompt_examples,
-                    manual_templates_map=manual_templates_map
+                    manual_templates_map=manual_templates_map,
+                    summary_map=summary_map
                 )
                 task.token_usage += tokens
                 task.logs.extend(batch_logs)
@@ -1154,7 +1206,8 @@ class CaseGenerationManager:
                         enable_batch=False,
                         prompt_examples=task.prompt_examples,
                         manual_templates_map=manual_templates_map,
-                        flow_preconditions_map=flow_preconditions_map
+                        flow_preconditions_map=flow_preconditions_map,
+                        summary_map=summary_map
                     )
                     task.token_usage += tokens
                     task.logs.extend(batch_logs)

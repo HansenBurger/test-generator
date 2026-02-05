@@ -166,10 +166,11 @@ class CaseXMindGenerator:
             segments = self._strip_root(segments)
             if not segments:
                 continue
-            if segments[-1] in ("业务流程", "业务规则"):
+            if segments[-1] in ("业务流程", "业务规则", "页面控制"):
                 segments = segments[:-1]
             if not segments:
                 continue
+            segments = self._collapse_modeling_path(segments)
             if len(segments) == 1:
                 if segments[0] not in activities:
                     activities.append(segments[0])
@@ -254,11 +255,12 @@ class CaseXMindGenerator:
         if point.point_type == "page_control" and leaf != "页面控制":
             return False
         if self.parsed.document_type == "modeling":
+            path = self._collapse_modeling_path(path)
             if step:
-                return self._contains_sequence(path, [top, task or "", step])
+                return path == [top, task or "", step]
             if task:
-                return self._contains_sequence(path, [top, task])
-            return len(path) == 1 and path[0] == top
+                return path == [top, task]
+            return path == [top]
         requirement = self.parsed.requirement_name or "测试用例"
         if path and path[0] == requirement and len(path) >= 2:
             return path[1] == top
@@ -336,6 +338,11 @@ class CaseXMindGenerator:
             return text.split(" - ", 1)[-1].strip()
         return text.strip()
 
+    def _collapse_modeling_path(self, segments: List[str]) -> List[str]:
+        if len(segments) <= 3:
+            return segments
+        return [segments[0], segments[1], " / ".join(segments[2:])]
+
     def _ensure_child_topics(self, parent: ET.Element) -> ET.Element:
         children = parent.find("children")
         if children is None:
@@ -394,11 +401,22 @@ class CaseXMindGenerator:
             return segments
         root = segments[0]
         requirement = self.parsed.requirement_name or ""
-        if requirement and requirement in root and ("需求项目编号" in root or "需求说明书编号" in root):
+        inferred = self._extract_requirement_from_root(root)
+        if requirement and requirement in root:
             return segments[1:]
-        if root == requirement:
+        if inferred and inferred in root:
+            return segments[1:]
+        if root == requirement or root == inferred:
             return segments[1:]
         return segments
+
+    def _extract_requirement_from_root(self, title: str) -> str:
+        if not title:
+            return ""
+        if "-" in title:
+            _, right = title.split("-", 1)
+            return right.strip()
+        return title.strip()
 
     def _create_topic(
         self,
