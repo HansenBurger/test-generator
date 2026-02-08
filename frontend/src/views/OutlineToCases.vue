@@ -77,18 +77,15 @@
           <div class="stat-stack">
             <div class="stat-item">
               <div class="stat-title">优先级分布</div>
-              <div class="stat-value">
-                高 {{ parsedData.stats?.by_priority?.['1'] || 0 }} /
-                中 {{ parsedData.stats?.by_priority?.['2'] || 0 }} /
-                低 {{ parsedData.stats?.by_priority?.['3'] || 0 }}
-              </div>
+              <el-tooltip :content="prioritySummary" placement="top">
+                <div class="stat-value">{{ prioritySummary }}</div>
+              </el-tooltip>
             </div>
             <div class="stat-item">
               <div class="stat-title">正/反例分布</div>
-              <div class="stat-value">
-                正例 {{ parsedData.stats?.by_subtype?.positive || 0 }} /
-                反例 {{ parsedData.stats?.by_subtype?.negative || 0 }}
-              </div>
+              <el-tooltip :content="subtypeSummary" placement="top">
+                <div class="stat-value">{{ subtypeSummary }}</div>
+              </el-tooltip>
             </div>
           </div>
         </el-col>
@@ -239,7 +236,7 @@
 </template>
 
 <script setup>
-import { ref, onBeforeUnmount } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import {
@@ -271,6 +268,16 @@ const sessionIdInput = ref('')
 const sessionExportLoading = ref(false)
 
 let pollTimer = null
+
+const prioritySummary = computed(() => {
+  const byPriority = parsedData.value?.stats?.by_priority || {}
+  return `高 ${byPriority['1'] || 0} / 中 ${byPriority['2'] || 0} / 低 ${byPriority['3'] || 0}`
+})
+
+const subtypeSummary = computed(() => {
+  const bySubtype = parsedData.value?.stats?.by_subtype || {}
+  return `正例 ${bySubtype.positive || 0} / 反例 ${bySubtype.negative || 0}`
+})
 
 const formatProgressMessage = (status) => {
   if (!status) {
