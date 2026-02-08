@@ -3,15 +3,26 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: test-generator-backend:latest
     container_name: test-generator-backend
     ports:
-      - "8001:8001"
+      - "${BACKEND_PORT:-8001}:8001"
     volumes:
       - ./backend:/app
-      - backend_data:/app/uploads
+      - "${DATA_VOLUME:-backend_data}:${DATA_DIR:-/app/data}"
     environment:
       - PYTHONUNBUFFERED=1
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DATA_DIR=${DATA_DIR:-/app/data}
+      - PARSED_DIR=${PARSED_DIR}
+      - GENERATION_DIR=${GENERATION_DIR}
+      - XMIND_DIR=${XMIND_DIR}
     restart: unless-stopped
     networks:
       - test-generator-network
@@ -20,9 +31,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    image: test-generator-frontend:latest
     container_name: test-generator-frontend
     ports:
-      - "3000:80"
+      - "${FRONTEND_PORT:-3000}:80"
     depends_on:
       - backend
     restart: unless-stopped

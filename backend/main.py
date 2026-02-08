@@ -53,8 +53,9 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     import sys
+    import os
     # 默认端口8001，可以通过命令行参数指定：python main.py --port 8001
-    port = 8001
+    port = int(os.getenv("BACKEND_PORT", "8001"))
     if len(sys.argv) > 1 and "--port" in sys.argv:
         try:
             port_index = sys.argv.index("--port")

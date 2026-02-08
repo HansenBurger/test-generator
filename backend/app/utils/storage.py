@@ -2,30 +2,31 @@
 文件存储工具
 """
 import json
-import os
 from typing import Any
 
-
-def _ensure_dir(path: str) -> str:
-    os.makedirs(path, exist_ok=True)
-    return path
+from app.core.config import (
+    DATA_DIR,
+    PARSED_DIR,
+    GENERATION_DIR,
+    XMIND_DIR,
+    ensure_dir
+)
 
 
 def get_base_data_dir() -> str:
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    return _ensure_dir(os.path.join(base_dir, "data"))
+    return ensure_dir(DATA_DIR)
 
 
 def get_parsed_dir() -> str:
-    return _ensure_dir(os.path.join(get_base_data_dir(), "parsed"))
+    return ensure_dir(PARSED_DIR)
 
 
 def get_generation_dir() -> str:
-    return _ensure_dir(os.path.join(get_base_data_dir(), "generation"))
+    return ensure_dir(GENERATION_DIR)
 
 
 def get_xmind_dir() -> str:
-    return _ensure_dir(os.path.join(get_base_data_dir(), "xmind"))
+    return ensure_dir(XMIND_DIR)
 
 
 def save_json(path: str, data: Any):

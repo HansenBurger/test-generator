@@ -59,3 +59,36 @@ npm run dev
 - 文档需包含"用例版本控制信息"表
 - 文档格式需符合规范
 - 生成的XMind文件可在XMind软件中打开和编辑
+
+## 部署（外网构建，内网部署）
+
+### 1) 外网构建并导出镜像
+
+```bash
+./deploy.sh export-images
+```
+
+生成 `test-generator-images.tar`，将该文件拷贝到内网服务器。
+
+### 2) 内网导入镜像并启动
+
+```bash
+./deploy.sh import-images
+```
+
+### 3) 配置项（通过 .env 或环境变量）
+
+必填：
+- `DASHSCOPE_API_KEY`
+
+可选（MySQL）：
+- `DATABASE_URL`（优先使用）
+- 或 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME`
+
+可选（存储路径）：
+- `DATA_DIR`（基础目录，默认 `backend/data` 或容器内 `/app/data`）
+- `PARSED_DIR` / `GENERATION_DIR` / `XMIND_DIR`（覆盖子目录）
+
+可选（端口）：
+- `BACKEND_PORT`（后端对外端口，默认 `8001`）
+- `FRONTEND_PORT`（前端对外端口，默认 `3000`）

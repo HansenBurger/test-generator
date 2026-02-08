@@ -128,6 +128,19 @@ check_dashscope_key() {
     return 0
 }
 
+# 读取 .env 或环境变量的配置值
+get_env_value() {
+    local key="$1"
+    local value=""
+    if [ -f ".env" ]; then
+        value=$(grep -E "^${key}=" .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d "\"\\'")
+    fi
+    if [ -z "$value" ]; then
+        value="${!key:-}"
+    fi
+    echo "$value"
+}
+
 # 构建镜像
 build_images() {
     print_info "开始构建Docker镜像..."
@@ -145,6 +158,36 @@ start_services() {
     COMPOSE_CMD=$(detect_compose_cmd)
     $COMPOSE_CMD up -d
     print_info "服务启动完成"
+}
+
+# 启动服务（不构建镜像，适用于内网）
+start_services_no_build() {
+    if ! check_dashscope_key; then
+        exit 1
+    fi
+    print_info "启动服务（不构建镜像）..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD up -d --no-build
+    print_info "服务启动完成"
+}
+
+# 导出镜像（外网构建后打包）
+export_images() {
+    build_images
+    print_info "导出镜像到本地文件..."
+    docker save -o test-generator-images.tar test-generator-backend:latest test-generator-frontend:latest
+    print_info "导出完成：test-generator-images.tar"
+}
+
+# 导入镜像（内网离线部署）
+import_images() {
+    if [ ! -f "test-generator-images.tar" ]; then
+        print_error "未找到 test-generator-images.tar，请先拷贝镜像包到当前目录"
+        exit 1
+    fi
+    print_info "导入镜像..."
+    docker load -i test-generator-images.tar
+    print_info "导入完成"
 }
 
 # 停止服务
@@ -206,6 +249,8 @@ show_menu() {
     echo "7. 查看日志"
     echo "8. 一键部署（配置+构建+启动）"
     echo "9. 清理所有（容器+镜像+数据卷）"
+    echo "10. 导出镜像（外网构建后打包）"
+    echo "11. 导入镜像并启动（内网部署）"
     echo "0. 退出"
     echo "=========================================="
     echo -n "请选择操作 [0-9]: "
@@ -247,8 +292,23 @@ main() {
             start_services
             view_status
             print_info "部署完成！"
-            print_info "前端访问地址: http://localhost:3000"
-            print_info "后端API地址: http://localhost:8001"
+            FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
+            BACKEND_PORT=$(get_env_value "BACKEND_PORT")
+            print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
+            print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
+            ;;
+        export-images)
+            export_images
+            ;;
+        import-images)
+            import_images
+            start_services_no_build
+            view_status
+            FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
+            BACKEND_PORT=$(get_env_value "BACKEND_PORT")
+            print_info "内网部署完成！"
+            print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
+            print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
             ;;
         *)
             # 交互式菜单
@@ -284,11 +344,26 @@ main() {
                         start_services
                         view_status
                         print_info "部署完成！"
-                        print_info "前端访问地址: http://localhost:3000"
-                        print_info "后端API地址: http://localhost:8001"
+                        FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
+                        BACKEND_PORT=$(get_env_value "BACKEND_PORT")
+                        print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
+                        print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
                         ;;
                     9)
                         clean
+                        ;;
+                    10)
+                        export_images
+                        ;;
+                    11)
+                        import_images
+                        start_services_no_build
+                        view_status
+                        FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
+                        BACKEND_PORT=$(get_env_value "BACKEND_PORT")
+                        print_info "内网部署完成！"
+                        print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
+                        print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
                         ;;
                     0)
                         print_info "退出"
