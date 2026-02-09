@@ -36,6 +36,9 @@ DASHSCOPE_API_KEY=你的密钥
 **可选配置：**
 
 ```
+# 大模型 API 访问地址（可选）
+DASHSCOPE_API_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+
 # MySQL 连接（二选一）
 DATABASE_URL=mysql+pymysql://user:password@host:3306/test_generator?charset=utf8mb4
 # 或

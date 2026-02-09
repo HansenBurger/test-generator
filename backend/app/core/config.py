@@ -18,6 +18,11 @@ PARSED_DIR = os.getenv("PARSED_DIR", os.path.join(DATA_DIR, "parsed"))
 GENERATION_DIR = os.getenv("GENERATION_DIR", os.path.join(DATA_DIR, "generation"))
 XMIND_DIR = os.getenv("XMIND_DIR", os.path.join(DATA_DIR, "xmind"))
 
+DASHSCOPE_API_BASE_URL = (
+    os.getenv("DASHSCOPE_API_BASE_URL", "").strip()
+    or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+)
+
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 if not DATABASE_URL:

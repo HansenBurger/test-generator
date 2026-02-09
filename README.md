@@ -81,6 +81,9 @@ npm run dev
 必填：
 - `DASHSCOPE_API_KEY`
 
+可选（大模型 API 访问地址）：
+- `DASHSCOPE_API_BASE_URL`（默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`）
+
 可选（MySQL）：
 - `DATABASE_URL`（优先使用）
 - 或 `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME`

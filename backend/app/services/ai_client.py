@@ -8,6 +8,7 @@ import subprocess
 from typing import Any, Tuple
 
 from openai import OpenAI
+from app.core.config import DASHSCOPE_API_BASE_URL
 from app.utils.logger import generator_logger
 
 
@@ -31,7 +32,7 @@ class AIClient:
         )
         self._client = OpenAI(
             api_key=api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            base_url=DASHSCOPE_API_BASE_URL,
         )
 
     def chat_json(
