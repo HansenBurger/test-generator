@@ -5,10 +5,14 @@ import json
 import os
 import re
 import subprocess
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 from openai import OpenAI
-from app.core.config import DASHSCOPE_API_BASE_URL
+from app.core.config import (
+    DASHSCOPE_API_BASE_URL,
+    DASHSCOPE_DEFAULT_MODEL,
+    DASHSCOPE_SUPPORTED_MODELS
+)
 from app.utils.logger import generator_logger
 
 
@@ -39,12 +43,15 @@ class AIClient:
         self,
         system_prompt: str,
         user_prompt: str,
-        model: str = "qwen-plus",
+        model: Optional[str] = None,
         temperature: float = 0.2,
         max_tokens: int = 800
     ) -> Tuple[Any, int]:
+        selected_model = (model or "").strip() or DASHSCOPE_DEFAULT_MODEL
+        if DASHSCOPE_SUPPORTED_MODELS and selected_model not in DASHSCOPE_SUPPORTED_MODELS:
+            raise ValueError(f"不支持的模型: {selected_model}")
         response = self._client.chat.completions.create(
-            model=model,
+            model=selected_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}

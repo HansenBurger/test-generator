@@ -28,6 +28,18 @@ DASHSCOPE_API_BASE_URL = (
     or "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
 
+# 大模型配置
+DASHSCOPE_DEFAULT_MODEL = os.getenv("DASHSCOPE_DEFAULT_MODEL", "qwen-plus").strip() or "qwen-plus"
+_supported_models = os.getenv("DASHSCOPE_SUPPORTED_MODELS", "").strip()
+if _supported_models:
+    DASHSCOPE_SUPPORTED_MODELS = [
+        model.strip() for model in _supported_models.split(",") if model.strip()
+    ]
+    if DASHSCOPE_DEFAULT_MODEL not in DASHSCOPE_SUPPORTED_MODELS:
+        DASHSCOPE_SUPPORTED_MODELS.append(DASHSCOPE_DEFAULT_MODEL)
+else:
+    DASHSCOPE_SUPPORTED_MODELS = []
+
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 if not DATABASE_URL:
