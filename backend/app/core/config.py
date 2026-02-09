@@ -10,13 +10,18 @@ def ensure_dir(path: str) -> str:
     return path
 
 
+def _get_env_path(name: str, default: str) -> str:
+    value = os.getenv(name, "").strip()
+    return value or default
+
+
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
 
-DATA_DIR = os.getenv("DATA_DIR", DEFAULT_DATA_DIR)
-PARSED_DIR = os.getenv("PARSED_DIR", os.path.join(DATA_DIR, "parsed"))
-GENERATION_DIR = os.getenv("GENERATION_DIR", os.path.join(DATA_DIR, "generation"))
-XMIND_DIR = os.getenv("XMIND_DIR", os.path.join(DATA_DIR, "xmind"))
+DATA_DIR = _get_env_path("DATA_DIR", DEFAULT_DATA_DIR)
+PARSED_DIR = _get_env_path("PARSED_DIR", os.path.join(DATA_DIR, "parsed"))
+GENERATION_DIR = _get_env_path("GENERATION_DIR", os.path.join(DATA_DIR, "generation"))
+XMIND_DIR = _get_env_path("XMIND_DIR", os.path.join(DATA_DIR, "xmind"))
 
 DASHSCOPE_API_BASE_URL = (
     os.getenv("DASHSCOPE_API_BASE_URL", "").strip()

@@ -49,6 +49,8 @@ DB_PASSWORD=your_password
 DB_NAME=test_generator
 
 # 存储路径（可选）
+# 注意：如果配置为空字符串，会自动回退到默认目录
+# 默认目录：/home/burger/project/test-generator/backend/data
 DATA_DIR=/app/data
 PARSED_DIR=/app/data/parsed
 GENERATION_DIR=/app/data/generation
