@@ -394,6 +394,7 @@ class XMindParser:
                 self._append_point(points, point_type, priority, subtype, context, cleaned_title)
                 self._total_count += 1
                 return
+            appended_count = 0
             for child in depth2_nodes:
                 child_title = self._get_title(child)
                 if not child_title:
@@ -402,53 +403,56 @@ class XMindParser:
                 subtype = self._detect_subtype(merged_title)
                 effective_priority = depth1_priority or priority
                 self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
+                appended_count += 1
+            if appended_count == 0:
+                subtype = self._detect_subtype(cleaned_title)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+                self._total_count += 1
+                return
+            self._total_count += appended_count
+            return
+
+        if not depth2_nodes:
+            subtype = self._detect_subtype(cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
             self._total_count += 1
             return
 
-        if len(depth2_nodes) != 1:
-            subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
-            self._total_count += 1
-            return
+        # 新规则：
+        # - 深度2允许并行，每个并行节点算一个测试点
+        # - 深度3不允许并行（每个深度2节点下必须仅有1个深度3节点）
+        appended_count = 0
+        for depth2_node in depth2_nodes:
+            depth2_title = self._get_title(depth2_node)
+            if not depth2_title:
+                continue
+            depth3_nodes = self._get_effective_children(depth2_node, point_type)
+            if len(depth3_nodes) != 1:
+                subtype = self._detect_subtype(cleaned_title)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+                self._total_count += 1
+                return
 
-        depth2_node = depth2_nodes[0]
-        depth2_title = self._get_title(depth2_node)
-        if not depth2_title:
+            depth3_node = depth3_nodes[0]
+            depth3_title = self._get_title(depth3_node)
+            if not depth3_title:
+                continue
+
+            merged_title = self._merge_titles(self._merge_titles(base_title, depth2_title), depth3_title)
+            if self._has_wrong_marker(depth3_node):
+                subtype = "negative"
+            else:
+                subtype = self._detect_subtype(merged_title)
+            effective_priority = depth1_priority or priority
+            self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
+            appended_count += 1
+
+        if appended_count == 0:
             subtype = self._detect_subtype(cleaned_title)
             self._append_point(points, point_type, priority, subtype, context, cleaned_title)
             self._total_count += 1
             return
-        depth3_nodes = self._get_effective_children(depth2_node, point_type)
-        if len(depth3_nodes) != 1:
-            subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
-            self._total_count += 1
-            return
-        depth3_node = depth3_nodes[0]
-        depth3_title = self._get_title(depth3_node)
-        if not depth3_title:
-            subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
-            self._total_count += 1
-            return
-        if self._has_wrong_marker(depth3_node):
-            subtype = "negative"
-        else:
-            subtype = self._detect_subtype(depth3_title)
-        effective_priority = depth1_priority or priority
-        self._append_point(
-            points,
-            point_type,
-            effective_priority,
-            subtype,
-            context,
-            cleaned_title,
-            manual_case=True,
-            preconditions=[depth1_cleaned],
-            steps=[depth2_title],
-            expected_results=[depth3_title]
-        )
-        self._total_count += 1
+        self._total_count += appended_count
 
     def _parse_priority(self, topic: ET.Element, title: str) -> Tuple[Optional[int], str]:
         marker_priority = self._get_marker_priority(topic)
