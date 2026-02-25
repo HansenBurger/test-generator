@@ -331,14 +331,29 @@ class CaseXMindGenerator:
             return False
         case_title = self._strip_context_from_title(case.text or point.text or point.point_id)
         case_topic = self._create_child_topic(parent, case_title, point.priority)
-        pre_content = self._create_child_topic(case_topic, self._join_with_index(case.preconditions))
-        steps_content = self._create_child_topic(pre_content, self._join_with_index(case.steps))
+        pre_text = self._join_with_index(case.preconditions)
+        steps_text = self._join_with_index(case.steps)
         expected_text = self._join_with_index(case.expected_results)
         marker_id = None
         subtype = case.subtype or point.subtype
         if subtype == "negative" and expected_text:
             marker_id = "symbol-wrong"
-        self._create_child_topic(steps_content, expected_text, marker_id=marker_id)
+
+        effective_priority = case.priority if case.priority in (1, 2, 3) else point.priority
+        if effective_priority == 3:
+            # 低优先级仅保留有值节点，避免生成空层级
+            current_parent = case_topic
+            if pre_text:
+                current_parent = self._create_child_topic(current_parent, pre_text)
+            if steps_text:
+                current_parent = self._create_child_topic(current_parent, steps_text)
+            if expected_text:
+                self._create_child_topic(current_parent, expected_text, marker_id=marker_id)
+        else:
+            pre_content = self._create_child_topic(case_topic, pre_text)
+            steps_content = self._create_child_topic(pre_content, steps_text)
+            self._create_child_topic(steps_content, expected_text, marker_id=marker_id)
+
         self._attached_case_ids.add(case.case_id)
         return True
 
