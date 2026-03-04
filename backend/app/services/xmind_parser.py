@@ -317,7 +317,10 @@ class XMindParser:
                 child_priority, child_cleaned = self._parse_priority(child, child_title)
                 merged_title = self._merge_titles(cleaned_title, child_cleaned)
                 subtype = self._detect_subtype(merged_title)
-                effective_priority = child_priority or priority
+                # 兼容“用例型XMind”：
+                # 子节点经常是“1、2、3”编号（前提/步骤/预期），不应覆盖父节点优先级。
+                # 因此父节点优先级优先，仅在父节点缺失时才回退子节点。
+                effective_priority = priority or child_priority
                 self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
             self._total_count += len(children)
             return
@@ -355,7 +358,7 @@ class XMindParser:
                         subtype = "negative"
                     else:
                         subtype = self._detect_subtype(depth3_title)
-                    effective_priority = child_priority or priority
+                    effective_priority = priority or child_priority
                     self._append_point(
                         points,
                         point_type,
@@ -401,7 +404,7 @@ class XMindParser:
                     continue
                 merged_title = self._merge_titles(base_title, child_title)
                 subtype = self._detect_subtype(merged_title)
-                effective_priority = depth1_priority or priority
+                effective_priority = priority or depth1_priority
                 self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
                 appended_count += 1
             if appended_count == 0:
@@ -443,7 +446,7 @@ class XMindParser:
                 subtype = "negative"
             else:
                 subtype = self._detect_subtype(merged_title)
-            effective_priority = depth1_priority or priority
+            effective_priority = priority or depth1_priority
             self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
             appended_count += 1
 
@@ -458,21 +461,8 @@ class XMindParser:
         marker_priority = self._get_marker_priority(topic)
         if marker_priority in (1, 2, 3):
             return marker_priority, title.strip()
-
-        pattern = r"^\s*[（(]?([123])[)）).、]\s*"
-        match = re.match(pattern, title)
-        if match:
-            priority = int(match.group(1))
-            cleaned = re.sub(pattern, "", title).strip()
-            return priority, cleaned
-
-        pattern_simple = r"^\s*([123])[\.\、]\s*"
-        match = re.match(pattern_simple, title)
-        if match:
-            priority = int(match.group(1))
-            cleaned = re.sub(pattern_simple, "", title).strip()
-            return priority, cleaned
-
+        # 优先级仅依赖 marker（priority-1/2/3），不再从标题文本推断，
+        # 避免把“步骤编号 1/2/3”误判成优先级。
         return None, title.strip()
 
     def _get_marker_priority(self, topic: ET.Element) -> Optional[int]:
