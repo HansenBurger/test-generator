@@ -284,6 +284,48 @@ def _build_manual_case(point: TestPoint) -> TestCase:
     )
 
 
+def _is_compliant_low_priority_point(point: TestPoint) -> bool:
+    if point.priority != 3:
+        return False
+    if point.point_type not in ("process", "rule", "page_control"):
+        return False
+    if point.subtype not in ("positive", "negative"):
+        return False
+    if not (point.text or "").strip():
+        return False
+    if not (point.context or "").strip():
+        return False
+    return True
+
+
+def _build_preserved_low_priority_cases(
+    points: List[TestPoint],
+    excluded_point_ids: Optional[set[str]] = None
+) -> List[TestCase]:
+    excluded = excluded_point_ids or set()
+    cases: List[TestCase] = []
+    for point in points:
+        if point.point_id in excluded:
+            continue
+        if not _is_compliant_low_priority_point(point):
+            continue
+        case = _build_manual_case(point)
+        _apply_rule_limits(case)
+        cases.append(case)
+    return cases
+
+
+def _merge_cases(primary: List[TestCase], secondary: List[TestCase]) -> List[TestCase]:
+    merged: List[TestCase] = []
+    seen_point_ids: set[str] = set()
+    for case in (primary or []) + (secondary or []):
+        if not case.point_id or case.point_id in seen_point_ids:
+            continue
+        merged.append(case)
+        seen_point_ids.add(case.point_id)
+    return merged
+
+
 def _resolve_manual_template(
     point: TestPoint,
     manual_templates_map: Optional[Dict[str, Dict[str, List[str]]]]
@@ -942,17 +984,25 @@ class CaseGenerationManager:
             p for p in parsed.test_points
             if p.point_id not in preview_point_ids and p.priority != 3
         ]
+        preview_cases = preview.get("cases", [])
+        excluded_point_ids = set(preview_point_ids)
+        excluded_point_ids.update(case.point_id for case in preview_cases if case.point_id)
+        preserved_low_priority_cases = _build_preserved_low_priority_cases(
+            parsed.test_points,
+            excluded_point_ids=excluded_point_ids
+        )
+        initial_cases = _merge_cases(preview_cases, preserved_low_priority_cases)
         task_id, session_id = self.create_generation_task(
             requirement_name=parsed.requirement_name,
             parse_id=parse_id,
             points=remaining_points,
             strategy=strategy,
-            initial_cases=preview.get("cases", []),
+            initial_cases=initial_cases,
             session_id=session_id,
             prompt_version=prompt_version,
             generation_mode="preview"
         )
-        return task_id, preview.get("cases", []), session_id
+        return task_id, initial_cases, session_id
 
     def create_task_for_parse(
         self,
@@ -965,12 +1015,13 @@ class CaseGenerationManager:
         if not parsed:
             raise ValueError("解析结果不存在，请先上传并解析XMind")
         points = [p for p in parsed.test_points if p.priority != 3]
+        preserved_low_priority_cases = _build_preserved_low_priority_cases(parsed.test_points)
         return self.create_generation_task(
             requirement_name=parsed.requirement_name,
             parse_id=parse_id,
             points=points,
             strategy=strategy,
-            initial_cases=[],
+            initial_cases=preserved_low_priority_cases,
             session_id=session_id,
             prompt_version=prompt_version,
             generation_mode="bulk"
