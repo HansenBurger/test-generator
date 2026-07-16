@@ -51,3 +51,7 @@ backend/debug_*.py
 backend/test_*.py
 test_*.py
 test_*.txt
+# 增量部署产物
+test-generator-frontend.tar
+test-generator-backend.tar
+frontend-dist.tar.gz

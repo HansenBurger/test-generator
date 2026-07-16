@@ -9,6 +9,7 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # 打印带颜色的消息
@@ -22,6 +23,10 @@ print_warn() {
 
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_step() {
+    echo -e "${CYAN}[STEP]${NC} $1"
 }
 
 # 检查Docker是否安装
@@ -149,6 +154,22 @@ build_images() {
     print_info "镜像构建完成"
 }
 
+# 仅构建前端镜像
+build_frontend() {
+    print_info "开始构建前端镜像..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD build frontend
+    print_info "前端镜像构建完成"
+}
+
+# 仅构建后端镜像
+build_backend() {
+    print_info "开始构建后端镜像..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD build backend
+    print_info "后端镜像构建完成"
+}
+
 # 启动服务
 start_services() {
     if ! check_dashscope_key; then
@@ -171,23 +192,133 @@ start_services_no_build() {
     print_info "服务启动完成"
 }
 
-# 导出镜像（外网构建后打包）
+# 导出镜像（外网构建后打包 - 全量）
 export_images() {
     build_images
-    print_info "导出镜像到本地文件..."
+    print_info "导出全量镜像到本地文件..."
     docker save -o test-generator-images.tar test-generator-backend:latest test-generator-frontend:latest
-    print_info "导出完成：test-generator-images.tar"
+    local size=$(du -h test-generator-images.tar | cut -f1)
+    print_info "导出完成：test-generator-images.tar (${size})"
 }
 
-# 导入镜像（内网离线部署）
+# 仅导出前端镜像（适用于前端代码变更）
+export_frontend() {
+    print_step "构建前端镜像..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD build frontend
+    print_step "导出前端镜像..."
+    docker save -o test-generator-frontend.tar test-generator-frontend:latest
+    local size=$(du -h test-generator-frontend.tar | cut -f1)
+    print_info "前端镜像导出完成：test-generator-frontend.tar (${size})"
+    echo ""
+    print_info "将以下文件拷贝到内网服务器后执行:"
+    echo "  scp test-generator-frontend.tar <user>@<host>:<path>/"
+    echo "  # 在内网服务器上："
+    echo "  ./deploy.sh import-frontend"
+}
+
+# 仅导出后端镜像（适用于后端代码变更）
+export_backend() {
+    print_step "构建后端镜像..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD build backend
+    print_step "导出后端镜像..."
+    docker save -o test-generator-backend.tar test-generator-backend:latest
+    local size=$(du -h test-generator-backend.tar | cut -f1)
+    print_info "后端镜像导出完成：test-generator-backend.tar (${size})"
+    echo ""
+    print_info "将以下文件拷贝到内网服务器后执行:"
+    echo "  scp test-generator-backend.tar <user>@<host>:<path>/"
+    echo "  # 在内网服务器上："
+    echo "  ./deploy.sh import-backend"
+}
+
+# 构建前端 dist 并打包（不构建镜像，适用于挂载模式的热更新）
+export_dist() {
+    print_step "检查前端依赖..."
+    if [ ! -d "frontend/node_modules" ]; then
+        print_info "安装前端依赖..."
+        (cd frontend && npm ci --prefer-offline --no-audit)
+    fi
+    print_step "构建前端 dist..."
+    (cd frontend && npm run build)
+    print_step "打包 dist..."
+    tar -czf frontend-dist.tar.gz -C frontend dist
+    local size=$(du -h frontend-dist.tar.gz | cut -f1)
+    print_info "前端 dist 打包完成：frontend-dist.tar.gz (${size})"
+    echo ""
+    print_info "将以下文件拷贝到内网服务器后执行:"
+    echo "  scp frontend-dist.tar.gz <user>@<host>:<path>/frontend/"
+    echo "  # 在内网服务器上："
+    echo "  ./deploy.sh update-dist"
+}
+
+# 导入镜像（内网离线部署 - 全量）
 import_images() {
     if [ ! -f "test-generator-images.tar" ]; then
         print_error "未找到 test-generator-images.tar，请先拷贝镜像包到当前目录"
         exit 1
     fi
-    print_info "导入镜像..."
+    print_info "导入全量镜像..."
     docker load -i test-generator-images.tar
     print_info "导入完成"
+}
+
+# 仅导入前端镜像并重启前端服务
+import_frontend() {
+    if [ ! -f "test-generator-frontend.tar" ]; then
+        print_error "未找到 test-generator-frontend.tar，请先拷贝前端镜像包到当前目录"
+        exit 1
+    fi
+    print_step "导入前端镜像..."
+    docker load -i test-generator-frontend.tar
+    print_step "重启前端容器..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD up -d --no-deps --force-recreate frontend
+    print_info "前端更新完成！"
+}
+
+# 仅导入后端镜像并重启后端服务
+import_backend() {
+    if [ ! -f "test-generator-backend.tar" ]; then
+        print_error "未找到 test-generator-backend.tar，请先拷贝后端镜像包到当前目录"
+        exit 1
+    fi
+    print_step "导入后端镜像..."
+    docker load -i test-generator-backend.tar
+    print_step "重启后端容器..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD up -d --no-deps --force-recreate backend
+    print_info "后端更新完成！"
+}
+
+# 更新前端 dist（挂载模式，零镜像操作）
+update_dist() {
+    if [ ! -f "frontend-dist.tar.gz" ] && [ ! -d "frontend/dist" ]; then
+        print_error "未找到 frontend-dist.tar.gz 或 frontend/dist，请先构建或拷贝"
+        exit 1
+    fi
+
+    if [ -f "frontend-dist.tar.gz" ]; then
+        print_step "解压 dist..."
+        rm -rf frontend/dist
+        tar -xzf frontend-dist.tar.gz -C frontend
+    fi
+
+    print_step "将 dist 同步到前端容器..."
+    # 如果容器正在运行，用 docker cp 直接更新
+    if docker ps --format '{{.Names}}' | grep -q 'test-generator-frontend'; then
+        # 先清除旧的静态资源
+        docker exec test-generator-frontend rm -rf /usr/share/nginx/html/assets
+        # 拷入新文件
+        docker cp frontend/dist/. test-generator-frontend:/usr/share/nginx/html/
+        # 重载 nginx 配置
+        docker exec test-generator-frontend nginx -s reload
+        print_info "前端 dist 热更新完成！（无需重建镜像）"
+    else
+        print_warn "前端容器未运行，请先启动服务"
+        print_info "  ./deploy.sh start"
+    fi
 }
 
 # 停止服务
@@ -234,26 +365,49 @@ clean() {
     fi
 }
 
+# 打印部署地址
+print_addresses() {
+    FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
+    BACKEND_PORT=$(get_env_value "BACKEND_PORT")
+    print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
+    print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
+}
+
 # 主菜单
 show_menu() {
     echo ""
     echo "=========================================="
     echo "  测试大纲生成器 - Docker部署脚本"
     echo "=========================================="
-    echo "1. 配置Docker镜像加速"
-    echo "2. 构建镜像"
-    echo "3. 启动服务"
-    echo "4. 停止服务"
-    echo "5. 重启服务"
-    echo "6. 查看状态"
-    echo "7. 查看日志"
-    echo "8. 一键部署（配置+构建+启动）"
-    echo "9. 清理所有（容器+镜像+数据卷）"
-    echo "10. 导出镜像（外网构建后打包）"
-    echo "11. 导入镜像并启动（内网部署）"
-    echo "0. 退出"
+    echo ""
+    echo "  ── 基础操作 ──"
+    echo "1.  配置Docker镜像加速"
+    echo "2.  构建镜像（全部）"
+    echo "3.  启动服务"
+    echo "4.  停止服务"
+    echo "5.  重启服务"
+    echo "6.  查看状态"
+    echo "7.  查看日志"
+    echo "8.  一键部署（配置+构建+启动）"
+    echo "9.  清理所有（容器+镜像+数据卷）"
+    echo ""
+    echo "  ── 全量镜像导出/导入 ──"
+    echo "10. 导出全量镜像（外网构建后打包）"
+    echo "11. 导入全量镜像并启动（内网部署）"
+    echo ""
+    echo "  ── 增量更新（推荐）──"
+    echo "12. 仅构建并导出前端镜像"
+    echo "13. 仅构建并导出后端镜像"
+    echo "14. 导入前端镜像并更新（内网）"
+    echo "15. 导入后端镜像并更新（内网）"
+    echo ""
+    echo "  ── 前端热更新（最快）──"
+    echo "16. 构建并打包前端 dist"
+    echo "17. 更新前端 dist（内网，无需镜像）"
+    echo ""
+    echo "0.  退出"
     echo "=========================================="
-    echo -n "请选择操作 [0-9]: "
+    echo -n "请选择操作: "
 }
 
 # 主函数
@@ -266,6 +420,12 @@ main() {
     case "${1:-}" in
         build)
             build_images
+            ;;
+        build-frontend)
+            build_frontend
+            ;;
+        build-backend)
+            build_backend
             ;;
         start)
             start_services
@@ -292,10 +452,7 @@ main() {
             start_services
             view_status
             print_info "部署完成！"
-            FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
-            BACKEND_PORT=$(get_env_value "BACKEND_PORT")
-            print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
-            print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
+            print_addresses
             ;;
         export-images)
             export_images
@@ -304,11 +461,28 @@ main() {
             import_images
             start_services_no_build
             view_status
-            FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
-            BACKEND_PORT=$(get_env_value "BACKEND_PORT")
             print_info "内网部署完成！"
-            print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
-            print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
+            print_addresses
+            ;;
+        # ── 增量更新命令 ──
+        export-frontend)
+            export_frontend
+            ;;
+        export-backend)
+            export_backend
+            ;;
+        import-frontend)
+            import_frontend
+            ;;
+        import-backend)
+            import_backend
+            ;;
+        # ── 前端热更新命令 ──
+        export-dist)
+            export_dist
+            ;;
+        update-dist)
+            update_dist
             ;;
         *)
             # 交互式菜单
@@ -344,10 +518,7 @@ main() {
                         start_services
                         view_status
                         print_info "部署完成！"
-                        FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
-                        BACKEND_PORT=$(get_env_value "BACKEND_PORT")
-                        print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
-                        print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
+                        print_addresses
                         ;;
                     9)
                         clean
@@ -359,11 +530,26 @@ main() {
                         import_images
                         start_services_no_build
                         view_status
-                        FRONTEND_PORT=$(get_env_value "FRONTEND_PORT")
-                        BACKEND_PORT=$(get_env_value "BACKEND_PORT")
                         print_info "内网部署完成！"
-                        print_info "前端访问地址: http://localhost:${FRONTEND_PORT:-3000}"
-                        print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
+                        print_addresses
+                        ;;
+                    12)
+                        export_frontend
+                        ;;
+                    13)
+                        export_backend
+                        ;;
+                    14)
+                        import_frontend
+                        ;;
+                    15)
+                        import_backend
+                        ;;
+                    16)
+                        export_dist
+                        ;;
+                    17)
+                        update_dist
                         ;;
                     0)
                         print_info "退出"
@@ -381,4 +567,3 @@ main() {
 
 # 执行主函数
 main "$@"
-
