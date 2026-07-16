@@ -95,3 +95,16 @@ npm run dev
 可选（端口）：
 - `BACKEND_PORT`（后端对外端口，默认 `8001`）
 - `FRONTEND_PORT`（前端对外端口，默认 `3000`）
+
+## WSL 开发环境
+
+在 WSL 中开发，请使用专用的启动脚本：
+
+```bash
+./start-wsl.sh          # 正常启动
+./start-wsl.sh --dev    # 调试模式
+```
+
+详细说明见 [WSL-README.md](./WSL-README.md)。
+
+**注意**：首次启动可能需要 20-30 秒，这是 WSL2 跨文件系统性能问题，属正常现象。
