@@ -130,22 +130,27 @@ class XMindParser:
         if title in self._SECTION_TYPES:
             context = self._build_context(current_path)
             point_type = self._SECTION_TYPES.get(title, "rule")
+            section_automated = self._has_automation_marker(topic)
             for child in self._get_children(topic):
                 if self._is_rule_alias(child):
                     alias_title = self._get_title(child)
                     if not alias_title:
                         continue
                     alias_context = self._build_context(current_path + [alias_title])
+                    alias_automated = section_automated or self._has_automation_marker(child)
                     for alias_child in self._get_children(child):
+                        child_auto = alias_automated or self._has_automation_marker(alias_child)
                         self._parse_test_point(
                             alias_child,
                             point_type,
                             alias_context,
                             points,
-                            depth_offset=1
+                            depth_offset=1,
+                            is_automated=child_auto
                         )
                     continue
-                self._parse_test_point(child, point_type, context, points)
+                child_automated = section_automated or self._has_automation_marker(child)
+                self._parse_test_point(child, point_type, context, points, is_automated=child_automated)
             return
 
         for child in self._get_children(topic):
@@ -249,6 +254,22 @@ class XMindParser:
                     return True
         return False
 
+
+    def _has_automation_marker(self, topic: ET.Element) -> bool:
+        for elem in topic.iter():
+            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if tag != "marker-ref":
+                continue
+            marker_id = elem.attrib.get("marker-id", "")
+            if marker_id == "task-start":
+                return True
+        marker_attr = topic.attrib.get("markers", "")
+        if marker_attr:
+            for marker_id in [m.strip() for m in marker_attr.split(",") if m.strip()]:
+                if marker_id == "task-start":
+                    return True
+        return False
+
     def _is_rule_alias(self, topic: ET.Element) -> bool:
         title = self._get_title(topic)
         if not title:
@@ -266,7 +287,8 @@ class XMindParser:
         manual_case: bool = False,
         preconditions: Optional[List[str]] = None,
         steps: Optional[List[str]] = None,
-        expected_results: Optional[List[str]] = None
+        expected_results: Optional[List[str]] = None,
+        is_automated: bool = False
     ):
         points.append(
             TestPoint(
@@ -279,7 +301,8 @@ class XMindParser:
                 preconditions=preconditions or [],
                 steps=steps or [],
                 expected_results=expected_results or [],
-                manual_case=manual_case
+                manual_case=manual_case,
+                is_automated=is_automated
             )
         )
 
@@ -289,7 +312,8 @@ class XMindParser:
         point_type: str,
         context: str,
         points: List[TestPoint],
-        depth_offset: int = 0
+        depth_offset: int = 0,
+        is_automated: bool = False
     ):
         node_title = self._get_title(node)
         if not node_title:
@@ -297,6 +321,7 @@ class XMindParser:
         priority, cleaned_title = self._parse_priority(node, node_title)
         if point_type in ("page_control", "rule") and self._is_placeholder_title(cleaned_title):
             return
+        node_automated = is_automated or self._has_automation_marker(node)
         children = self._get_effective_children(node, point_type)
         depth = self._max_effective_depth(node, point_type)
         effective_depth = max(depth - depth_offset, 0)
@@ -305,7 +330,7 @@ class XMindParser:
 
         if effective_depth == 0 or not children:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
             self._total_count += 1
             return
 
@@ -321,7 +346,7 @@ class XMindParser:
                 # 子节点经常是“1、2、3”编号（前提/步骤/预期），不应覆盖父节点优先级。
                 # 因此父节点优先级优先，仅在父节点缺失时才回退子节点。
                 effective_priority = priority or child_priority
-                self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
+                self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated)
             self._total_count += len(children)
             return
 
@@ -369,14 +394,15 @@ class XMindParser:
                         manual_case=True,
                         preconditions=[child_cleaned],
                         steps=[depth2_title],
-                        expected_results=[depth3_title]
+                        expected_results=[depth3_title],
+                        is_automated=node_automated
                     )
                 self._total_count += len(chains)
                 return
 
         if len(children) != 1:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
             self._total_count += 1
             return
 
@@ -384,7 +410,7 @@ class XMindParser:
         depth1_title = self._get_title(depth1_node)
         if not depth1_title:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
             self._total_count += 1
             return
         depth1_priority, depth1_cleaned = self._parse_priority(depth1_node, depth1_title)
@@ -394,7 +420,7 @@ class XMindParser:
         if effective_depth == 2:
             if not depth2_nodes:
                 subtype = self._detect_subtype(cleaned_title)
-                self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
                 self._total_count += 1
                 return
             appended_count = 0
@@ -405,11 +431,11 @@ class XMindParser:
                 merged_title = self._merge_titles(base_title, child_title)
                 subtype = self._detect_subtype(merged_title)
                 effective_priority = priority or depth1_priority
-                self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
+                self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated)
                 appended_count += 1
             if appended_count == 0:
                 subtype = self._detect_subtype(cleaned_title)
-                self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
                 self._total_count += 1
                 return
             self._total_count += appended_count
@@ -417,7 +443,7 @@ class XMindParser:
 
         if not depth2_nodes:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
             self._total_count += 1
             return
 
@@ -432,7 +458,7 @@ class XMindParser:
             depth3_nodes = self._get_effective_children(depth2_node, point_type)
             if len(depth3_nodes) != 1:
                 subtype = self._detect_subtype(cleaned_title)
-                self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
                 self._total_count += 1
                 return
 
@@ -447,12 +473,12 @@ class XMindParser:
             else:
                 subtype = self._detect_subtype(merged_title)
             effective_priority = priority or depth1_priority
-            self._append_point(points, point_type, effective_priority, subtype, context, merged_title)
+            self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated)
             appended_count += 1
 
         if appended_count == 0:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
             self._total_count += 1
             return
         self._total_count += appended_count
@@ -511,7 +537,8 @@ class XMindParser:
             "total": total_override if total_override is not None else len(points),
             "by_type": {"process": 0, "rule": 0, "page_control": 0},
             "by_priority": {"1": 0, "2": 0, "3": 0, "unknown": 0},
-            "by_subtype": {"positive": 0, "negative": 0, "unknown": 0}
+            "by_subtype": {"positive": 0, "negative": 0, "unknown": 0},
+            "by_automation": {"automated": 0, "manual": 0}
         }
 
         for point in points:
@@ -524,5 +551,9 @@ class XMindParser:
                 stats["by_subtype"][point.subtype] += 1
             else:
                 stats["by_subtype"]["unknown"] += 1
+            if point.is_automated:
+                stats["by_automation"]["automated"] += 1
+            else:
+                stats["by_automation"]["manual"] += 1
 
         return stats

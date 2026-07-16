@@ -301,8 +301,12 @@
             <div class="summary-item">
               <div class="summary-label">类型分布</div>
               <div class="summary-value">
-                流程 {{ importTypeCounts.process }} / 规则 {{ importTypeCounts.rule }} / 页面 {{ importTypeCounts.page_control }}
+                {{ importTypeCounts.process }}/{{ importTypeCounts.rule }}/{{ importTypeCounts.page_control }}
               </div>
+            </div>
+            <div class="summary-item">
+              <div class="summary-label">自动化</div>
+              <div class="summary-value">{{ importAutomationTotal }}</div>
             </div>
           </div>
 
@@ -320,6 +324,7 @@
                 {{ row.priority1 }} / {{ row.priority2 }} / {{ row.priority3 }}
               </template>
             </el-table-column>
+            <el-table-column prop="automated" label="自动化" width="80" align="center" />
           </el-table>
         </el-card>
       </el-tab-pane>
@@ -404,7 +409,8 @@ const importStats = computed(() => {
         function: groupKey, component: component, count: 0,
         process: 0, rule: 0, page_control: 0,
         positive: 0, negative: 0,
-        priority1: 0, priority2: 0, priority3: 0
+        priority1: 0, priority2: 0, priority3: 0,
+        automated: 0
       }
     }
     const g = groups[groupKey]
@@ -415,6 +421,7 @@ const importStats = computed(() => {
     if (point.priority === 1) g.priority1++
     else if (point.priority === 2) g.priority2++
     else if (point.priority === 3) g.priority3++
+    if (point.is_automated) g.automated++
   }
   return Object.values(groups)
 })
@@ -426,6 +433,15 @@ const importTypeCounts = computed(() => {
     if (counts[point.point_type] !== undefined) counts[point.point_type]++
   }
   return counts
+})
+
+const importAutomationTotal = computed(() => {
+  const points = importedPoints.value
+  let automated = 0
+  for (const point of points) {
+    if (point.is_automated) automated++
+  }
+  return automated
 })
 
 const prioritySummary = computed(() => {
@@ -784,7 +800,7 @@ const handleExportCsv = () => {
     ElMessage.warning('暂无统计数据可导出')
     return
   }
-  const headers = ['组件', '功能/步骤', '案例数', '流程', '规则', '页面', '正例', '反例', '优先级(高)', '优先级(中)', '优先级(低)']
+  const headers = ['组件', '功能/步骤', '案例数', '流程', '规则', '页面', '正例', '反例', '优先级(高)', '优先级(中)', '优先级(低)', '自动化']
   const csvRows = [headers.join(',')]
   for (const row of rows) {
     const values = [
@@ -798,7 +814,8 @@ const handleExportCsv = () => {
       row.negative,
       row.priority1,
       row.priority2,
-      row.priority3
+      row.priority3,
+      row.automated
     ].map(v => {
       const s = String(v)
       if (s.includes(',') || s.includes('"') || s.includes('\n')) {
@@ -1004,7 +1021,7 @@ const formatTimestamp = () => {
   background: #f5f7fa;
   border-radius: 6px;
   flex: 1;
-  min-width: 140px;
+  min-width: 120px;
 }
 
 .summary-label {
@@ -1018,6 +1035,6 @@ const formatTimestamp = () => {
   font-size: 18px;
   font-weight: 600;
   color: #303133;
-  white-space: nowrap;
+  word-break: break-all;
 }
 </style>

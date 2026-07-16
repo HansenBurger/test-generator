@@ -129,6 +129,7 @@ class TestPoint(BaseModel):
     steps: List[str] = []
     expected_results: List[str] = []
     manual_case: bool = False
+    is_automated: bool = False
 
 
 class ParsedXmindDocument(BaseModel):
