@@ -17,16 +17,16 @@
         :on-change="handleFileChange"
         :on-remove="handleFileRemove"
         :file-list="fileList"
-        accept=".xmind"
+        accept=".xmind,.json"
         :limit="1"
         :disabled="parsing || previewing"
       >
         <el-icon class="el-icon--upload"><upload-filled /></el-icon>
         <div class="el-upload__text">
-          将XMind拖到此处，或<em>点击上传</em>
+          将文件拖到此处，或<em>点击上传</em>
         </div>
         <template #tip>
-          <div class="el-upload__tip">仅支持 .xmind 格式，命名规范：需求名_V版本_时间（仅支持单个文件）</div>
+          <div class="el-upload__tip">支持 .xmind 和 .json 格式（仅支持单个文件）</div>
         </template>
       </el-upload>
 
@@ -231,6 +231,99 @@
           </div>
         </el-card>
       </el-tab-pane>
+
+      <el-tab-pane label="导入案例" name="import">
+
+        <!-- 模块1: 导入文件 -->
+        <el-card class="import-file-card" shadow="hover">
+          <template #header>
+            <div class="card-header">
+              <span>导入文件</span>
+            </div>
+          </template>
+          <el-upload
+            ref="importUploadRef"
+            class="upload-demo"
+            drag
+            :auto-upload="false"
+            :on-change="handleImportFileChange"
+            :on-remove="handleImportFileRemove"
+            :file-list="importFileList"
+            accept=".xmind,.json"
+            :limit="1"
+            :disabled="importParsing"
+          >
+            <el-icon class="el-icon--upload"><upload-filled /></el-icon>
+            <div class="el-upload__text">
+              将文件拖到此处，或<em>点击上传</em>
+            </div>
+            <template #tip>
+              <div class="el-upload__tip">支持 .xmind 和 .json 格式，用于导入案例并统计各功能/步骤的案例数</div>
+            </template>
+          </el-upload>
+        </el-card>
+
+        <!-- 模块2: 操作 -->
+        <el-card class="import-action-card" shadow="hover">
+          <template #header>
+            <div class="card-header">
+              <span>操作</span>
+            </div>
+          </template>
+          <div class="action-buttons">
+            <el-button type="primary" :loading="importParsing" :disabled="importFileList.length === 0" @click="handleImport">
+              导入并统计
+            </el-button>
+            <el-button :disabled="importedPoints.length === 0" @click="resetImport">重置</el-button>
+            <el-button v-if="importedPoints.length > 0" type="success" @click="handleExportCsv">
+              导出 CSV
+            </el-button>
+          </div>
+        </el-card>
+
+        <!-- 模块3: 案例统计 -->
+        <el-card v-if="importedPoints.length > 0" class="import-stats-card" shadow="never">
+          <template #header>
+            <div class="card-header">
+              <span>案例统计</span>
+            </div>
+          </template>
+
+          <div class="summary-row">
+            <div class="summary-item">
+              <div class="summary-label">案例总数</div>
+              <div class="summary-value">{{ importedPoints.length }}</div>
+            </div>
+            <div class="summary-item">
+              <div class="summary-label">功能/步骤数</div>
+              <div class="summary-value">{{ importStats.length }}</div>
+            </div>
+            <div class="summary-item">
+              <div class="summary-label">类型分布</div>
+              <div class="summary-value">
+                流程 {{ importTypeCounts.process }} / 规则 {{ importTypeCounts.rule }} / 页面 {{ importTypeCounts.page_control }}
+              </div>
+            </div>
+          </div>
+
+          <el-table :data="importStats" border stripe style="width: 100%; margin-top: 16px;">
+            <el-table-column prop="component" label="组件" width="120" align="center" v-if="false" />
+            <el-table-column prop="function" label="功能/步骤" min-width="200" />
+            <el-table-column prop="count" label="案例数" width="100" align="center" />
+            <el-table-column prop="process" label="流程" width="80" align="center" />
+            <el-table-column prop="rule" label="规则" width="80" align="center" />
+            <el-table-column prop="page_control" label="页面" width="100" align="center" />
+            <el-table-column prop="positive" label="正例" width="80" align="center" />
+            <el-table-column prop="negative" label="反例" width="80" align="center" />
+            <el-table-column label="优先级 (高/中/低)" width="140" align="center">
+              <template #default="{ row }">
+                {{ row.priority1 }} / {{ row.priority2 }} / {{ row.priority3 }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-tab-pane>
+
     </el-tabs>
   </div>
 </template>
@@ -268,6 +361,72 @@ const sessionIdInput = ref('')
 const sessionExportLoading = ref(false)
 
 let pollTimer = null
+
+// 导入案例 tab 状态
+const importUploadRef = ref(null)
+const importFileList = ref([])
+const importParsing = ref(false)
+const importedPoints = ref([])
+const importFileName = ref('')
+const importRequirementName = ref('')
+
+const typeLabelMap = {
+  process: '业务流程',
+  rule: '业务规则',
+  page_control: '页面'
+}
+
+const importStats = computed(() => {
+  const points = importedPoints.value
+  if (!points.length) return []
+  const groups = {}
+  for (const point of points) {
+    const context = point.context || ''
+    const typeSuffixes = ['业务流程', '业务规则', '页面控制']
+    const pathParts = context ? context.split(' / ').filter(Boolean) : []
+    let groupKey
+    let component = ''
+    if (pathParts.length >= 2) {
+      const last = pathParts[pathParts.length - 1]
+      if (typeSuffixes.includes(last)) {
+        groupKey = pathParts[pathParts.length - 2]
+      } else {
+        groupKey = last
+      }
+      component = pathParts[1] || ''
+    } else if (pathParts.length === 1) {
+      groupKey = pathParts[0]
+    } else {
+      groupKey = typeLabelMap[point.point_type] || point.point_type || '未分类'
+    }
+    if (!groups[groupKey]) {
+      groups[groupKey] = {
+        function: groupKey, component: component, count: 0,
+        process: 0, rule: 0, page_control: 0,
+        positive: 0, negative: 0,
+        priority1: 0, priority2: 0, priority3: 0
+      }
+    }
+    const g = groups[groupKey]
+    g.count++
+    if (g[point.point_type] !== undefined) g[point.point_type]++
+    if (point.subtype === 'positive') g.positive++
+    else if (point.subtype === 'negative') g.negative++
+    if (point.priority === 1) g.priority1++
+    else if (point.priority === 2) g.priority2++
+    else if (point.priority === 3) g.priority3++
+  }
+  return Object.values(groups)
+})
+
+const importTypeCounts = computed(() => {
+  const points = importedPoints.value
+  const counts = { process: 0, rule: 0, page_control: 0 }
+  for (const point of points) {
+    if (counts[point.point_type] !== undefined) counts[point.point_type]++
+  }
+  return counts
+})
 
 const prioritySummary = computed(() => {
   const byPriority = parsedData.value?.stats?.by_priority || {}
@@ -552,6 +711,117 @@ const handleExportBySession = async () => {
   }
 }
 
+const handleImportFileChange = (file, files) => {
+  importFileList.value = files || []
+}
+
+const handleImportFileRemove = () => {
+  if (importParsing.value) return false
+}
+
+const handleImport = async () => {
+  const file = importUploadRef.value?.fileList?.[0]?.raw || importFileList.value?.[0]?.raw
+  if (!file) {
+    ElMessage.warning('请先选择文件')
+    return
+  }
+  importParsing.value = true
+  try {
+    const name = file.name.toLowerCase()
+    if (name.endsWith('.json')) {
+      const text = await file.text()
+      const data = JSON.parse(text)
+      if (Array.isArray(data)) {
+        importedPoints.value = data
+      } else if (data?.test_points) {
+        importedPoints.value = data.test_points
+      } else if (data?.cases) {
+        importedPoints.value = data.cases
+      } else {
+        ElMessage.error('无法识别的 JSON 格式，请提供案例数组或包含 test_points/cases 字段的对象')
+        return
+      }
+      importFileName.value = file.name
+      importRequirementName.value = file.name.replace(/\.json$/i, '')
+      ElMessage.success(`成功导入 ${importedPoints.value.length} 条案例`)
+    } else if (name.endsWith('.xmind')) {
+      const res = await parseXmind(file)
+      if (!res.success) {
+        throw new Error(res.message || '解析失败')
+      }
+      importedPoints.value = res.data?.test_points || []
+      importFileName.value = file.name
+      importRequirementName.value = res.data?.requirement_name || ''
+      if (res.data?.stats) {
+        ElMessage.success(`成功解析 ${res.data.stats.total || importedPoints.value.length} 个测试点`)
+      } else {
+        ElMessage.success(`成功解析 ${importedPoints.value.length} 个测试点`)
+      }
+    } else {
+      ElMessage.error('不支持的文件格式，请上传 .xmind 或 .json 文件')
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '导入失败')
+  } finally {
+    importParsing.value = false
+  }
+}
+
+const resetImport = () => {
+  importedPoints.value = []
+  importFileName.value = ''
+  importRequirementName.value = ''
+  importFileList.value = []
+  if (importUploadRef.value) {
+    importUploadRef.value.clearFiles()
+  }
+}
+
+
+const handleExportCsv = () => {
+  const rows = importStats.value
+  if (!rows.length) {
+    ElMessage.warning('暂无统计数据可导出')
+    return
+  }
+  const headers = ['组件', '功能/步骤', '案例数', '流程', '规则', '页面', '正例', '反例', '优先级(高)', '优先级(中)', '优先级(低)']
+  const csvRows = [headers.join(',')]
+  for (const row of rows) {
+    const values = [
+      row.component || '',
+      row.function || '',
+      row.count,
+      row.process,
+      row.rule,
+      row.page_control,
+      row.positive,
+      row.negative,
+      row.priority1,
+      row.priority2,
+      row.priority3
+    ].map(v => {
+      const s = String(v)
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return '"' + s.replace(/"/g, '""') + '"'
+      }
+      return s
+    })
+    csvRows.push(values.join(','))
+  }
+  const BOM = '\ufeff'
+  const blob = new Blob([BOM + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  const baseName = importRequirementName.value || importFileName.value.replace(/\.[^.]+$/, '') || '案例统计'
+  link.download = `${baseName}_${formatTimestamp()}.csv`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  ElMessage.success('CSV 导出成功')
+}
+
 onBeforeUnmount(() => {
   stopPolling()
 })
@@ -611,7 +881,10 @@ const formatTimestamp = () => {
 .preview-table-card,
 .confirm-card,
 .progress-card,
-.export-card {
+.export-card,
+.session-card,
+.import-file-card,
+.import-action-card {
   margin-bottom: 20px;
 }
 
@@ -706,5 +979,45 @@ const formatTimestamp = () => {
 .multi-line {
   white-space: pre-line;
   font-size: 12px;
+}
+
+.import-stats-card {
+  margin-bottom: 20px;
+}
+
+.import-action-card :deep(.el-card__body) {
+  padding: 16px 20px;
+}
+
+.import-action-card .action-buttons {
+  margin-top: 0;
+}
+
+.summary-row {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.summary-item {
+  padding: 12px 20px;
+  background: #f5f7fa;
+  border-radius: 6px;
+  flex: 1;
+  min-width: 140px;
+}
+
+.summary-label {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.summary-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: #303133;
+  white-space: nowrap;
 }
 </style>
