@@ -2,6 +2,11 @@
 
 # 测试大纲生成器部署脚本
 # Docker镜像加速地址: https://5f4mc5ba.mirror.aliyuncs.com
+#
+# 镜像架构说明：
+# - 前端镜像：独立镜像，包含构建好的静态文件
+# - 后端基础镜像：包含 LibreOffice 和 Python 依赖（~1-2GB，很少变化）
+# - 后端应用镜像：基于基础镜像，仅包含应用代码（~几MB）
 
 set -e
 
@@ -10,6 +15,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 打印带颜色的消息
@@ -27,6 +33,10 @@ print_error() {
 
 print_step() {
     echo -e "${CYAN}[STEP]${NC} $1"
+}
+
+print_arch() {
+    echo -e "${BLUE}[ARCH]${NC} $1"
 }
 
 # 检查Docker是否安装
@@ -85,7 +95,7 @@ configure_docker_mirror() {
     sudo cp "$DOCKER_DAEMON_JSON" "${DOCKER_DAEMON_JSON}.bak.$(date +%Y%m%d_%H%M%S)"
     
     # 添加镜像加速配置
-    sudo python3 << EOF
+    sudo python3 << PYBLOCK
 import json
 import sys
 
@@ -105,7 +115,7 @@ with open('$DOCKER_DAEMON_JSON', 'w') as f:
     json.dump(config, f, indent=2, ensure_ascii=False)
 
 print("配置已更新")
-EOF
+PYBLOCK
     
     print_info "Docker镜像加速配置已添加，需要重启Docker服务"
     print_warn "请运行以下命令重启Docker: sudo systemctl restart docker"
@@ -146,29 +156,69 @@ get_env_value() {
     echo "$value"
 }
 
-# 构建镜像
-build_images() {
-    print_info "开始构建Docker镜像..."
-    COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD build
-    print_info "镜像构建完成"
+# ══════════════════════════════════════════════
+# 构建相关
+# ══════════════════════════════════════════════
+
+# 构建后端基础镜像（包含 LibreOffice 和 Python 依赖）
+build_backend_base() {
+    print_step "构建后端基础镜像（包含 LibreOffice + Python 依赖）..."
+    print_arch "基础镜像较大（~1-2GB），仅在依赖变更时需要重建"
+    
+    docker build \
+        -f backend/Dockerfile.base \
+        -t test-generator-backend-base:latest \
+        backend
+    
+    local size=$(docker images test-generator-backend-base:latest --format "{{.Size}}")
+    print_info "后端基础镜像构建完成: test-generator-backend-base:latest (${size})"
 }
 
-# 仅构建前端镜像
+# 构建后端应用镜像（仅包含代码）
+build_backend_app() {
+    print_step "构建后端应用镜像（仅包含代码）..."
+    
+    # 检查基础镜像是否存在
+    if ! docker image inspect test-generator-backend-base:latest &>/dev/null; then
+        print_warn "基础镜像不存在，将自动构建..."
+        build_backend_base
+    fi
+    
+    docker build \
+        -f backend/Dockerfile \
+        -t test-generator-backend:latest \
+        backend
+    
+    local size=$(docker images test-generator-backend:latest --format "{{.Size}}")
+    print_info "后端应用镜像构建完成: test-generator-backend:latest (${size})"
+}
+
+# 构建前端镜像
 build_frontend() {
-    print_info "开始构建前端镜像..."
+    print_step "构建前端镜像..."
     COMPOSE_CMD=$(detect_compose_cmd)
     $COMPOSE_CMD build frontend
     print_info "前端镜像构建完成"
 }
 
-# 仅构建后端镜像
-build_backend() {
-    print_info "开始构建后端镜像..."
-    COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD build backend
-    print_info "后端镜像构建完成"
+# 构建所有镜像（完整构建）
+build_images() {
+    print_info "开始构建所有镜像..."
+    build_backend_base
+    build_backend_app
+    build_frontend
+    print_info "所有镜像构建完成"
 }
+
+# 仅构建后端（自动构建基础镜像和应用镜像）
+build_backend() {
+    build_backend_base
+    build_backend_app
+}
+
+# ══════════════════════════════════════════════
+# 启动/停止
+# ══════════════════════════════════════════════
 
 # 启动服务
 start_services() {
@@ -192,20 +242,56 @@ start_services_no_build() {
     print_info "服务启动完成"
 }
 
-# 导出镜像（外网构建后打包 - 全量）
+# 停止服务
+stop_services() {
+    print_info "停止服务..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD down
+    print_info "服务已停止"
+}
+
+# 重启服务
+restart_services() {
+    print_info "重启服务..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD restart
+    print_info "服务重启完成"
+}
+
+# ══════════════════════════════════════════════
+# 全量导出/导入
+# ══════════════════════════════════════════════
+
+# 导出全量镜像（包含基础镜像和应用镜像）
 export_images() {
     build_images
-    print_info "导出全量镜像到本地文件..."
-    docker save -o test-generator-images.tar test-generator-backend:latest test-generator-frontend:latest
+    print_step "导出全量镜像到本地文件..."
+    docker save -o test-generator-images.tar \
+        test-generator-backend-base:latest \
+        test-generator-backend:latest \
+        test-generator-frontend:latest
     local size=$(du -h test-generator-images.tar | cut -f1)
     print_info "导出完成：test-generator-images.tar (${size})"
 }
 
-# 仅导出前端镜像（适用于前端代码变更）
+# 导入全量镜像
+import_images() {
+    if [ ! -f "test-generator-images.tar" ]; then
+        print_error "未找到 test-generator-images.tar，请先拷贝镜像包到当前目录"
+        exit 1
+    fi
+    print_info "导入全量镜像..."
+    docker load -i test-generator-images.tar
+    print_info "导入完成"
+}
+
+# ══════════════════════════════════════════════
+# 前端增量更新
+# ══════════════════════════════════════════════
+
+# 导出前端镜像
 export_frontend() {
-    print_step "构建前端镜像..."
-    COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD build frontend
+    build_frontend
     print_step "导出前端镜像..."
     docker save -o test-generator-frontend.tar test-generator-frontend:latest
     local size=$(du -h test-generator-frontend.tar | cut -f1)
@@ -217,23 +303,21 @@ export_frontend() {
     echo "  ./deploy.sh import-frontend"
 }
 
-# 仅导出后端镜像（适用于后端代码变更）
-export_backend() {
-    print_step "构建后端镜像..."
+# 导入前端镜像并重启
+import_frontend() {
+    if [ ! -f "test-generator-frontend.tar" ]; then
+        print_error "未找到 test-generator-frontend.tar，请先拷贝到当前目录"
+        exit 1
+    fi
+    print_step "导入前端镜像..."
+    docker load -i test-generator-frontend.tar
+    print_step "重启前端容器..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD build backend
-    print_step "导出后端镜像..."
-    docker save -o test-generator-backend.tar test-generator-backend:latest
-    local size=$(du -h test-generator-backend.tar | cut -f1)
-    print_info "后端镜像导出完成：test-generator-backend.tar (${size})"
-    echo ""
-    print_info "将以下文件拷贝到内网服务器后执行:"
-    echo "  scp test-generator-backend.tar <user>@<host>:<path>/"
-    echo "  # 在内网服务器上："
-    echo "  ./deploy.sh import-backend"
+    $COMPOSE_CMD up -d --no-deps --force-recreate frontend
+    print_info "前端更新完成！"
 }
 
-# 构建前端 dist 并打包（不构建镜像，适用于挂载模式的热更新）
+# 构建前端 dist 并打包（不构建镜像，最快）
 export_dist() {
     print_step "检查前端依赖..."
     if [ ! -d "frontend/node_modules" ]; then
@@ -248,48 +332,9 @@ export_dist() {
     print_info "前端 dist 打包完成：frontend-dist.tar.gz (${size})"
     echo ""
     print_info "将以下文件拷贝到内网服务器后执行:"
-    echo "  scp frontend-dist.tar.gz <user>@<host>:<path>/frontend/"
+    echo "  scp frontend-dist.tar.gz <user>@<host>:<path>/"
     echo "  # 在内网服务器上："
     echo "  ./deploy.sh update-dist"
-}
-
-# 导入镜像（内网离线部署 - 全量）
-import_images() {
-    if [ ! -f "test-generator-images.tar" ]; then
-        print_error "未找到 test-generator-images.tar，请先拷贝镜像包到当前目录"
-        exit 1
-    fi
-    print_info "导入全量镜像..."
-    docker load -i test-generator-images.tar
-    print_info "导入完成"
-}
-
-# 仅导入前端镜像并重启前端服务
-import_frontend() {
-    if [ ! -f "test-generator-frontend.tar" ]; then
-        print_error "未找到 test-generator-frontend.tar，请先拷贝前端镜像包到当前目录"
-        exit 1
-    fi
-    print_step "导入前端镜像..."
-    docker load -i test-generator-frontend.tar
-    print_step "重启前端容器..."
-    COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD up -d --no-deps --force-recreate frontend
-    print_info "前端更新完成！"
-}
-
-# 仅导入后端镜像并重启后端服务
-import_backend() {
-    if [ ! -f "test-generator-backend.tar" ]; then
-        print_error "未找到 test-generator-backend.tar，请先拷贝后端镜像包到当前目录"
-        exit 1
-    fi
-    print_step "导入后端镜像..."
-    docker load -i test-generator-backend.tar
-    print_step "重启后端容器..."
-    COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD up -d --no-deps --force-recreate backend
-    print_info "后端更新完成！"
 }
 
 # 更新前端 dist（挂载模式，零镜像操作）
@@ -301,33 +346,134 @@ update_dist() {
 
     if [ -f "frontend-dist.tar.gz" ]; then
         print_step "解压 dist..."
-        rm -rf frontend/dist
+        if [ -d "frontend/dist" ]; then
+            rm -r frontend/dist
+        fi
         tar -xzf frontend-dist.tar.gz -C frontend
     fi
 
     print_step "将 dist 同步到前端容器..."
-    # 如果容器正在运行，用 docker cp 直接更新
     if docker ps --format '{{.Names}}' | grep -q 'test-generator-frontend'; then
-        # 先清除旧的静态资源
-        docker exec test-generator-frontend rm -rf /usr/share/nginx/html/assets
-        # 拷入新文件
+        docker exec test-generator-frontend sh -c "find /usr/share/nginx/html/assets -delete 2>/dev/null; true"
         docker cp frontend/dist/. test-generator-frontend:/usr/share/nginx/html/
-        # 重载 nginx 配置
         docker exec test-generator-frontend nginx -s reload
         print_info "前端 dist 热更新完成！（无需重建镜像）"
     else
-        print_warn "前端容器未运行，请先启动服务"
-        print_info "  ./deploy.sh start"
+        print_warn "前端容器未运行，请先启动服务: ./deploy.sh start"
     fi
 }
 
-# 停止服务
-stop_services() {
-    print_info "停止服务..."
-    COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD down
-    print_info "服务已停止"
+# ══════════════════════════════════════════════
+# 后端增量更新
+# ══════════════════════════════════════════════
+
+# 导出后端基础镜像（包含 LibreOffice）
+export_backend_base() {
+    print_step "导出后端基础镜像（包含 LibreOffice）..."
+    
+    if ! docker image inspect test-generator-backend-base:latest &>/dev/null; then
+        print_warn "基础镜像不存在，将自动构建..."
+        build_backend_base
+    fi
+    
+    docker save -o test-generator-backend-base.tar test-generator-backend-base:latest
+    local size=$(du -h test-generator-backend-base.tar | cut -f1)
+    print_info "后端基础镜像导出完成：test-generator-backend-base.tar (${size})"
+    echo ""
+    print_info "将以下文件拷贝到内网服务器后执行:"
+    echo "  scp test-generator-backend-base.tar <user>@<host>:<path>/"
+    echo "  # 在内网服务器上："
+    echo "  ./deploy.sh import-backend-base"
 }
+
+# 导入后端基础镜像
+import_backend_base() {
+    if [ ! -f "test-generator-backend-base.tar" ]; then
+        print_error "未找到 test-generator-backend-base.tar，请先拷贝到当前目录"
+        exit 1
+    fi
+    print_step "导入后端基础镜像..."
+    docker load -i test-generator-backend-base.tar
+    print_info "后端基础镜像导入完成"
+}
+
+# 导出后端应用镜像（仅代码，很小）
+export_backend() {
+    print_step "构建后端应用镜像..."
+    
+    if ! docker image inspect test-generator-backend-base:latest &>/dev/null; then
+        print_warn "基础镜像不存在，将自动构建..."
+        build_backend_base
+    fi
+    
+    build_backend_app
+    docker save -o test-generator-backend.tar test-generator-backend:latest
+    local size=$(du -h test-generator-backend.tar | cut -f1)
+    print_info "后端应用镜像导出完成：test-generator-backend.tar (${size})"
+    echo ""
+    print_info "将以下文件拷贝到内网服务器后执行:"
+    echo "  scp test-generator-backend.tar <user>@<host>:<path>/"
+    echo "  # 在内网服务器上："
+    echo "  ./deploy.sh import-backend"
+}
+
+# 导入后端应用镜像并重启
+import_backend() {
+    if [ ! -f "test-generator-backend.tar" ]; then
+        print_error "未找到 test-generator-backend.tar，请先拷贝到当前目录"
+        exit 1
+    fi
+    print_step "导入后端应用镜像..."
+    docker load -i test-generator-backend.tar
+    print_step "重启后端容器..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD up -d --no-deps --force-recreate backend
+    print_info "后端更新完成！"
+}
+
+# 打包后端代码（不构建镜像，适用于 volume mount 模式）
+export_backend_code() {
+    print_step "打包后端代码..."
+    tar -czf backend-code.tar.gz \
+        --exclude='backend/.venv' \
+        --exclude='backend/__pycache__' \
+        --exclude='backend/**/__pycache__' \
+        --exclude='backend/data' \
+        --exclude='*.pyc' \
+        backend
+    local size=$(du -h backend-code.tar.gz | cut -f1)
+    print_info "后端代码打包完成：backend-code.tar.gz (${size})"
+    echo ""
+    print_info "将以下文件拷贝到内网服务器后执行:"
+    echo "  scp backend-code.tar.gz <user>@<host>:<path>/"
+    echo "  # 在内网服务器上："
+    echo "  ./deploy.sh update-backend-code"
+}
+
+# 更新后端代码（volume mount 模式，零镜像操作）
+update_backend_code() {
+    if [ ! -f "backend-code.tar.gz" ] && [ ! -d "backend" ]; then
+        print_error "未找到 backend-code.tar.gz 或 backend 目录，请先打包或拷贝"
+        exit 1
+    fi
+
+    if [ -f "backend-code.tar.gz" ]; then
+        print_step "解压后端代码..."
+        if [ -d "backend" ]; then
+            mv backend backend.backup.$(date +%Y%m%d_%H%M%S)
+        fi
+        tar -xzf backend-code.tar.gz
+    fi
+
+    print_step "重启后端容器（代码通过 volume mount 更新）..."
+    COMPOSE_CMD=$(detect_compose_cmd)
+    $COMPOSE_CMD restart backend
+    print_info "后端代码更新完成！（无需重建镜像）"
+}
+
+# ══════════════════════════════════════════════
+# 其他
+# ══════════════════════════════════════════════
 
 # 查看日志
 view_logs() {
@@ -343,14 +489,6 @@ view_status() {
     $COMPOSE_CMD ps
 }
 
-# 重启服务
-restart_services() {
-    print_info "重启服务..."
-    COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD restart
-    print_info "服务重启完成"
-}
-
 # 清理
 clean() {
     print_warn "这将删除所有容器、镜像和数据卷，确定要继续吗？(y/N)"
@@ -359,6 +497,7 @@ clean() {
         print_info "清理中..."
         COMPOSE_CMD=$(detect_compose_cmd)
         $COMPOSE_CMD down -v --rmi all
+        docker rmi test-generator-backend-base:latest 2>/dev/null || true
         print_info "清理完成"
     else
         print_info "已取消清理"
@@ -373,7 +512,37 @@ print_addresses() {
     print_info "后端API地址: http://localhost:${BACKEND_PORT:-8001}"
 }
 
+# 显示镜像架构信息
+show_architecture() {
+    echo ""
+    echo -e "${BLUE}=========================================="
+    echo "  镜像架构说明"
+    echo -e "==========================================${NC}"
+    echo ""
+    echo "前端镜像 (~30MB):"
+    echo "  - 包含构建好的静态文件"
+    echo "  - 更新命令: export-frontend / import-frontend"
+    echo ""
+    echo "后端基础镜像 (~1-2GB):"
+    echo "  - 包含 LibreOffice + Python 依赖"
+    echo "  - 很少变化，首次部署或依赖变更时导出"
+    echo "  - 更新命令: export-backend-base / import-backend-base"
+    echo ""
+    echo "后端应用镜像 (~几MB):"
+    echo "  - 基于基础镜像，仅包含代码"
+    echo "  - 代码变更时导出此镜像即可"
+    echo "  - 更新命令: export-backend / import-backend"
+    echo ""
+    echo "代码热更新 (无需镜像，最快):"
+    echo "  - 前端: export-dist / update-dist"
+    echo "  - 后端: export-backend-code / update-backend-code"
+    echo ""
+}
+
+# ══════════════════════════════════════════════
 # 主菜单
+# ══════════════════════════════════════════════
+
 show_menu() {
     echo ""
     echo "=========================================="
@@ -382,7 +551,7 @@ show_menu() {
     echo ""
     echo "  ── 基础操作 ──"
     echo "1.  配置Docker镜像加速"
-    echo "2.  构建镜像（全部）"
+    echo "2.  构建所有镜像（完整构建）"
     echo "3.  启动服务"
     echo "4.  停止服务"
     echo "5.  重启服务"
@@ -391,32 +560,38 @@ show_menu() {
     echo "8.  一键部署（配置+构建+启动）"
     echo "9.  清理所有（容器+镜像+数据卷）"
     echo ""
-    echo "  ── 全量镜像导出/导入 ──"
-    echo "10. 导出全量镜像（外网构建后打包）"
-    echo "11. 导入全量镜像并启动（内网部署）"
+    echo "  ── 全量部署（首次部署）──"
+    echo "10. 导出全量镜像"
+    echo "11. 导入全量镜像并启动"
     echo ""
-    echo "  ── 增量更新（推荐）──"
-    echo "12. 仅构建并导出前端镜像"
-    echo "13. 仅构建并导出后端镜像"
-    echo "14. 导入前端镜像并更新（内网）"
-    echo "15. 导入后端镜像并更新（内网）"
+    echo "  ── 前端更新 ──"
+    echo "12. 导出前端镜像 (~30MB)"
+    echo "13. 导入前端镜像并更新"
+    echo "14. 导出前端 dist (~400KB，推荐)"
+    echo "15. 更新前端 dist（热更新）"
     echo ""
-    echo "  ── 前端热更新（最快）──"
-    echo "16. 构建并打包前端 dist"
-    echo "17. 更新前端 dist（内网，无需镜像）"
+    echo "  ── 后端更新 ──"
+    echo "16. 导出后端基础镜像 (~1-2GB，首次)"
+    echo "17. 导入后端基础镜像"
+    echo "18. 导出后端应用镜像 (~几MB)"
+    echo "19. 导入后端应用镜像并更新"
+    echo "20. 导出后端代码 (~几MB)"
+    echo "21. 更新后端代码（热更新）"
     echo ""
+    echo "99. 查看镜像架构说明"
     echo "0.  退出"
     echo "=========================================="
     echo -n "请选择操作: "
 }
 
+# ══════════════════════════════════════════════
 # 主函数
+# ══════════════════════════════════════════════
+
 main() {
-    # 检查基本环境
     check_docker
     check_docker_compose
     
-    # 如果提供了参数，直接执行对应操作
     case "${1:-}" in
         build)
             build_images
@@ -426,6 +601,9 @@ main() {
             ;;
         build-backend)
             build_backend
+            ;;
+        build-backend-base)
+            build_backend_base
             ;;
         start)
             start_services
@@ -464,53 +642,51 @@ main() {
             print_info "内网部署完成！"
             print_addresses
             ;;
-        # ── 增量更新命令 ──
         export-frontend)
             export_frontend
-            ;;
-        export-backend)
-            export_backend
             ;;
         import-frontend)
             import_frontend
             ;;
-        import-backend)
-            import_backend
-            ;;
-        # ── 前端热更新命令 ──
         export-dist)
             export_dist
             ;;
         update-dist)
             update_dist
             ;;
+        export-backend-base)
+            export_backend_base
+            ;;
+        import-backend-base)
+            import_backend_base
+            ;;
+        export-backend)
+            export_backend
+            ;;
+        import-backend)
+            import_backend
+            ;;
+        export-backend-code)
+            export_backend_code
+            ;;
+        update-backend-code)
+            update_backend_code
+            ;;
+        architecture)
+            show_architecture
+            ;;
         *)
-            # 交互式菜单
             while true; do
                 show_menu
                 read -r choice
                 case $choice in
-                    1)
-                        configure_docker_mirror
-                        ;;
-                    2)
-                        build_images
-                        ;;
-                    3)
-                        start_services
-                        ;;
-                    4)
-                        stop_services
-                        ;;
-                    5)
-                        restart_services
-                        ;;
-                    6)
-                        view_status
-                        ;;
-                    7)
-                        view_logs
-                        ;;
+                    1)  configure_docker_mirror ;;
+                    2)  build_images ;;
+                    3)  start_services ;;
+                    4)  stop_services ;;
+                    5)  restart_services ;;
+                    6)  view_status ;;
+                    7)  view_logs ;;
                     8)
                         if ! check_dashscope_key; then continue; fi
                         configure_docker_mirror
@@ -520,12 +696,8 @@ main() {
                         print_info "部署完成！"
                         print_addresses
                         ;;
-                    9)
-                        clean
-                        ;;
-                    10)
-                        export_images
-                        ;;
+                    9)  clean ;;
+                    10) export_images ;;
                     11)
                         import_images
                         start_services_no_build
@@ -533,31 +705,19 @@ main() {
                         print_info "内网部署完成！"
                         print_addresses
                         ;;
-                    12)
-                        export_frontend
-                        ;;
-                    13)
-                        export_backend
-                        ;;
-                    14)
-                        import_frontend
-                        ;;
-                    15)
-                        import_backend
-                        ;;
-                    16)
-                        export_dist
-                        ;;
-                    17)
-                        update_dist
-                        ;;
-                    0)
-                        print_info "退出"
-                        exit 0
-                        ;;
-                    *)
-                        print_error "无效选择，请重新输入"
-                        ;;
+                    12) export_frontend ;;
+                    13) import_frontend ;;
+                    14) export_dist ;;
+                    15) update_dist ;;
+                    16) export_backend_base ;;
+                    17) import_backend_base ;;
+                    18) export_backend ;;
+                    19) import_backend ;;
+                    20) export_backend_code ;;
+                    21) update_backend_code ;;
+                    99) show_architecture ;;
+                    0)  print_info "退出"; exit 0 ;;
+                    *)  print_error "无效选择，请重新输入" ;;
                 esac
                 echo ""
             done
@@ -565,5 +725,4 @@ main() {
     esac
 }
 
-# 执行主函数
 main "$@"

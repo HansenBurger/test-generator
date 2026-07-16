@@ -7,9 +7,37 @@
 | 方式 | 适用场景 | 传输大小 | 内网操作 |
 |------|---------|---------|---------|
 | **全量部署** | 首次部署 / 前后端同时更新 | ~数GB | `import-images` |
+| **前端 dist 热更新** | 仅前端代码变更（最快） | ~436KB | `update-dist` |
 | **前端镜像更新** | 仅前端代码变更 | ~30MB | `import-frontend` |
-| **后端镜像更新** | 仅后端代码变更 | ~数GB | `import-backend` |
-| **前端 dist 热更新** | 仅前端代码变更（最快） | ~1-5MB | `update-dist` |
+| **后端应用镜像更新** | 仅后端代码变更 | ~几MB | `import-backend` |
+| **后端代码热更新** | 仅后端代码变更（volume 模式） | ~几MB | `update-backend-code` |
+| **后端基础镜像更新** | Python 依赖变更（极少） | ~1-2GB | `import-backend-base` |
+
+### 镜像架构说明
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  前端镜像 (test-generator-frontend:latest) ~30MB            │
+│  └── nginx + 静态文件                                        │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  后端应用镜像 (test-generator-backend:latest) ~几MB          │
+│  └── 应用代码 (FROM test-generator-backend-base)             │
+└─────────────────────────────────────────────────────────────┘
+         │ 基于
+         ▼
+┌─────────────────────────────────────────────────────────────┐
+│  后端基础镜像 (test-generator-backend-base:latest) ~1-2GB    │
+│  └── python:3.10-slim + LibreOffice + pip packages           │
+│  └── 很少变化，仅依赖更新时需要重建                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**优化要点：**
+- LibreOffice 体积大（~1-2GB），但很少变化
+- 后端代码变更时，只需重建/导出应用镜像（~几MB），无需重新打包 LibreOffice
+- 前端更新时，可用 `export-dist` 直接打包静态文件（~436KB），跳过镜像构建
 
 ---
 
@@ -21,7 +49,7 @@
 ./deploy.sh export-images
 ```
 
-产物：`test-generator-images.tar`（包含前后端镜像）
+产物：`test-generator-images.tar`（包含前后端镜像 + 基础镜像）
 
 将以下文件拷贝到内网服务器：
 - `test-generator-images.tar`
@@ -37,7 +65,31 @@
 
 ---
 
-## 方式二：前端镜像增量更新（仅改前端代码）
+## 方式二：前端 dist 热更新（最快，推荐日常前端优化）
+
+无需构建 Docker 镜像，仅更新前端静态文件。
+
+### 1. 外网侧：构建 dist 并打包
+
+```bash
+./deploy.sh export-dist
+```
+
+产物：`frontend-dist.tar.gz`（约 436KB）
+
+### 2. 内网侧：解压并热更新
+
+```bash
+# 拷贝 frontend-dist.tar.gz 到项目根目录后执行
+./deploy.sh update-dist
+```
+
+> **原理：** 通过 `docker cp` 直接将新的 dist 文件注入运行中的 nginx 容器，然后 reload nginx。
+> 无需停止服务、无需重建镜像，秒级完成。
+
+---
+
+## 方式三：前端镜像增量更新（仅改前端代码）
 
 ### 1. 外网侧：构建并导出前端镜像
 
@@ -50,66 +102,75 @@
 ### 2. 内网侧：导入并更新
 
 ```bash
-# 拷贝 tar 文件后执行
 ./deploy.sh import-frontend
 ```
 
-> 仅重建前端容器，后端服务不受影响。
-
 ---
 
-## 方式三：后端镜像增量更新（仅改后端代码）
+## 方式四：后端应用镜像增量更新（仅改后端代码）
 
-### 1. 外网侧：构建并导出后端镜像
+**前提：** 内网已有 `test-generator-backend-base` 基础镜像。
+
+### 1. 外网侧：构建并导出后端应用镜像
 
 ```bash
 ./deploy.sh export-backend
 ```
 
-产物：`test-generator-backend.tar`
+产物：`test-generator-backend.tar`（约几MB，不含 LibreOffice）
 
 ### 2. 内网侧：导入并更新
 
 ```bash
-# 拷贝 tar 文件后执行
 ./deploy.sh import-backend
 ```
 
+> 仅重建应用层镜像，LibreOffice 保持不变。
+
 ---
 
-## 方式四：前端 dist 热更新（最快，推荐日常前端优化）
+## 方式五：后端代码热更新（volume 模式，零镜像操作）
 
-无需构建 Docker 镜像，仅更新前端静态文件。
+适用于 `docker-compose.yml` 中已配置 `volumes: - ./backend:/app` 的场景。
 
-### 1. 外网侧：构建 dist 并打包
-
-```bash
-./deploy.sh export-dist
-```
-
-产物：`frontend-dist.tar.gz`（约 1-5MB）
-
-### 2. 内网侧：解压并热更新
+### 1. 外网侧：打包后端代码
 
 ```bash
-# 拷贝 frontend-dist.tar.gz 到项目 frontend/ 目录后执行
-./deploy.sh update-dist
+./deploy.sh export-backend-code
 ```
 
-> **原理：** 通过 `docker cp` 直接将新的 dist 文件注入运行中的 nginx 容器，然后 reload nginx。
-> 无需停止服务、无需重建镜像，秒级完成。
+产物：`backend-code.tar.gz`（约几MB，仅代码）
 
-### 手动方式（如果不用 deploy.sh）
+### 2. 内网侧：解压并重启
 
 ```bash
-# 1. 解压
-tar -xzf frontend-dist.tar.gz -C frontend/
-
-# 2. 注入到运行中的容器
-docker exec test-generator-frontend rm -rf /usr/share/nginx/html/assets
-docker cp frontend/dist/. test-generator-frontend:/usr/share/nginx/html/
-docker exec test-generator-frontend nginx -s reload
+./deploy.sh update-backend-code
 ```
+
+> **原理：** docker-compose 通过 volume mount 将 `./backend` 挂载到容器内 `/app`。
+> 更新代码后只需 `docker compose restart backend`，无需重建镜像。
+
+---
+
+## 方式六：后端基础镜像更新（仅依赖变更时）
+
+**极少使用**，仅在 `requirements.txt` 或系统依赖变更时需要。
+
+### 1. 外网侧：构建并导出基础镜像
+
+```bash
+./deploy.sh export-backend-base
+```
+
+产物：`test-generator-backend-base.tar`（约 1-2GB）
+
+### 2. 内网侧：导入基础镜像
+
+```bash
+./deploy.sh import-backend-base
+```
+
+> 导入基础镜像后，还需要重新构建/导入应用镜像。
 
 ---
 
@@ -186,5 +247,9 @@ DATA_VOLUME=backend_data
 4) **前端热更新后页面没有变化**
    浏览器可能缓存了旧文件，尝试 `Ctrl+Shift+R`（强制刷新）或清除浏览器缓存。
 
-5) **deploy.sh 交互式菜单**
+5) **后端热更新后代码没有生效**
+   确保 `docker-compose.yml` 中后端服务配置了 `volumes: - ./backend:/app`，否则需要走镜像更新流程。
+
+6) **deploy.sh 交互式菜单**
    直接运行 `./deploy.sh`（不带参数）可进入交互式菜单，查看所有可用操作。
+   输入 `99` 可查看镜像架构说明。

@@ -1,0 +1,51 @@
+# 后端基础镜像 Dockerfile
+# 包含系统依赖（LibreOffice）和 Python 依赖
+# 仅在依赖变更时需要重新构建
+
+FROM python:3.10-slim
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LIBREOFFICE_HOME=/usr/lib/libreoffice \
+    HOME=/tmp
+
+# 配置apt使用阿里云镜像源
+RUN if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list; \
+        sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list; \
+    fi && \
+    if [ -d /etc/apt/sources.list.d ]; then \
+        find /etc/apt/sources.list.d -name "*.sources" -exec sed -i 's|deb.debian.org|mirrors.aliyun.com|g' {} \; 2>/dev/null || true; \
+        find /etc/apt/sources.list.d -name "*.list" -exec sed -i 's|deb.debian.org|mirrors.aliyun.com|g' {} \; 2>/dev/null || true; \
+    fi
+
+# 安装系统依赖（LibreOffice + antiword + pandoc）
+RUN apt-get update && apt-get install -y \
+    gcc \
+    antiword \
+    pandoc \
+    libreoffice \
+    libreoffice-writer \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/.config /tmp/.cache
+
+# 配置pip使用阿里云镜像源
+RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+    pip config set install.trusted-host mirrors.aliyun.com
+
+# 安装 Python 依赖
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --only-binary :all: pydantic && \
+    pip install -r /tmp/requirements.txt --no-cache-dir && \
+    rm /tmp/requirements.txt
+
+# 设置工作目录
+WORKDIR /app
+
+# 默认启动命令（会被应用镜像覆盖）
+CMD ["python", "main.py"]
