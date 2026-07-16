@@ -1,6 +1,6 @@
 <template>
   <div class="case-container" :class="{ expanded: parsedData }">
-    <el-tabs v-model="activeTab" class="case-tabs">
+    <el-tabs v-model="activeTab" class="case-tabs" stretch>
       <el-tab-pane label="生成用例" name="generate">
         <el-card class="upload-card" shadow="hover">
       <template #header>
@@ -890,6 +890,32 @@ const formatTimestamp = () => {
 
 .case-tabs {
   width: 100%;
+}
+
+/* 统一 tab 头部样式：等宽、居中、一致的间距 */
+:deep(.case-tabs .el-tabs__header) {
+  margin-bottom: 24px;
+}
+
+:deep(.case-tabs .el-tabs__nav) {
+  width: 100%;
+  display: flex;
+}
+
+:deep(.case-tabs .el-tabs__item) {
+  flex: 1;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 500;
+  padding: 0 !important;
+  height: 44px;
+  line-height: 44px;
+  transition: color 0.2s ease;
+}
+
+:deep(.case-tabs .el-tabs__active-bar) {
+  height: 3px;
+  border-radius: 2px;
 }
 
 .upload-card,
