@@ -397,8 +397,18 @@ import_backend_base() {
     print_info "后端基础镜像导入完成"
 }
 
-# 导出后端应用镜像（仅代码，很小）
+# 导出后端应用镜像
 export_backend() {
+    print_warn "注意：docker save 会导出所有依赖层（包括 base 镜像），tar 包仍然较大"
+    print_info "如果内网已有 base 镜像，推荐使用 export-backend-code（72KB）进行热更新"
+    echo ""
+    read -p "是否继续导出完整镜像？(y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_info "已取消"
+        return
+    fi
+    
     print_step "构建后端应用镜像..."
     
     if ! docker image inspect test-generator-backend-base:latest &>/dev/null; then
@@ -571,12 +581,12 @@ show_menu() {
     echo "15. 更新前端 dist（热更新）"
     echo ""
     echo "  ── 后端更新 ──"
-    echo "16. 导出后端基础镜像 (~1-2GB，首次)"
+    echo "16. 导出后端基础镜像 (~1-2GB，仅首次)"
     echo "17. 导入后端基础镜像"
-    echo "18. 导出后端应用镜像 (~几MB)"
+    echo "18. 导出后端应用镜像 (~1-2GB，含所有层)"
     echo "19. 导入后端应用镜像并更新"
-    echo "20. 导出后端代码 (~几MB)"
-    echo "21. 更新后端代码（热更新）"
+    echo "20. 导出后端代码 (~72KB，推荐)"
+    echo "21. 更新后端代码（热更新，推荐）"
     echo ""
     echo "99. 查看镜像架构说明"
     echo "0.  退出"
