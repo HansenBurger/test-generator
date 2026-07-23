@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from app.models.schemas import ParsedXmindDocument, TestPoint, TestCase
-from app.services.ai_client import AIClient
+from app.services.ai_client import AIClient, get_runtime_config
 from app.services.prompts import (
     PROMPT_VERSION,
     SYSTEM_PROMPT_METADATA,
@@ -653,7 +653,9 @@ class CaseGenerator:
         flow_preconditions_map: Optional[Dict[str, List[str]]] = None,
         summary_map: Optional[Dict[str, str]] = None
     ) -> Tuple[TestCase, int]:
-        temperature = 0.2 if strategy == "standard" else 0.6
+        # 全局配置温度优先，仅作用于单点用例生成；批量/解析类调用保持固定低温以保证 JSON 稳定
+        _cfg_temp = get_runtime_config().get("temperature")
+        temperature = _cfg_temp if _cfg_temp is not None else (0.2 if strategy == "standard" else 0.6)
         max_tokens = 900 if strategy == "standard" else 600
         manual_template = _resolve_manual_template(point, manual_templates_map)
         flow_preconditions = None
