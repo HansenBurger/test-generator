@@ -2,7 +2,7 @@
 数据库模型定义
 """
 from datetime import datetime
-from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
 
 from app.db.database import Base
 
@@ -39,3 +39,16 @@ class GenerationRecord(Base):
     json_path = Column(Text, nullable=True)
     xmind_path = Column(Text, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+
+
+class ModelConfig(Base):
+    """运行时模型配置（单行，id 固定为 1）。NULL 字段表示沿用 .env/默认值。"""
+    __tablename__ = "model_config"
+
+    id = Column(Integer, primary_key=True)
+    enable_thinking = Column(Boolean, nullable=True)
+    thinking_token_buffer = Column(Integer, nullable=True)
+    current_model = Column(String(128), nullable=True)
+    temperature = Column(Float, nullable=True)
+    model_mode = Column(String(16), nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

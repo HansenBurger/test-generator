@@ -2,7 +2,7 @@
 数据模型定义
 """
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class RequirementInfo(BaseModel):
@@ -246,3 +246,25 @@ class ExportCasesRequest(BaseModel):
     requirement_name: str
     cases: List[TestCase] = []
 
+
+
+class ModelConfigUpdate(BaseModel):
+    """运行时模型配置更新请求"""
+    enable_thinking: bool
+    thinking_token_buffer: int = Field(..., ge=0, le=32000)
+    current_model: Optional[str] = Field(None, max_length=128)
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
+    model_mode: Optional[str] = Field(None, max_length=16)
+
+
+class ModelConfigResponse(BaseModel):
+    """运行时模型配置响应（含可选模型列表与默认值）"""
+    enable_thinking: bool
+    thinking_token_buffer: int
+    current_model: Optional[str] = None
+    temperature: Optional[float] = None
+    model_mode: str = "default"
+    effective_model: str
+    available_models: List[str]
+    default_model: str
+    defaults: Dict[str, Any]

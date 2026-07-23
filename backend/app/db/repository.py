@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from app.db.database import SessionLocal
-from app.db.models import ParseRecord, GenerationRecord
+from app.db.models import ParseRecord, GenerationRecord, ModelConfig
 
 
 @contextmanager
@@ -187,5 +187,33 @@ def update_generation_record(
             record.xmind_path = xmind_path
         if completed_at is not None:
             record.completed_at = completed_at
+        session.flush()
+        return record
+
+
+def get_model_config() -> Optional[ModelConfig]:
+    """读取运行时模型配置（单行），不存在返回 None。"""
+    with get_session() as session:
+        return session.query(ModelConfig).filter(ModelConfig.id == 1).first()
+
+
+def upsert_model_config(
+    enable_thinking: bool,
+    thinking_token_buffer: int,
+    current_model: Optional[str],
+    temperature: Optional[float] = None,
+    model_mode: Optional[str] = None,
+) -> ModelConfig:
+    """全量写入运行时模型配置；current_model/temperature/model_mode 传 None 表示沿用默认。"""
+    with get_session() as session:
+        record = session.query(ModelConfig).filter(ModelConfig.id == 1).first()
+        if not record:
+            record = ModelConfig(id=1)
+            session.add(record)
+        record.enable_thinking = enable_thinking
+        record.thinking_token_buffer = thinking_token_buffer
+        record.current_model = current_model
+        record.temperature = temperature
+        record.model_mode = model_mode
         session.flush()
         return record
