@@ -284,6 +284,23 @@ export const exportCasesBySessionWithHeaders = (sessionId) => {
     })
 }
 
+/**
+ * 获取运行时模型配置（含可选模型列表、当前生效模型、默认值）
+ * @returns {Promise}
+ */
+export const getModelConfig = () => {
+    return api.get('/model-config')
+}
+
+/**
+ * 更新运行时模型配置（持久化，立即生效）
+ * @param {Object} cfg - { enable_thinking, thinking_token_buffer, current_model }
+ * @returns {Promise}
+ */
+export const updateModelConfig = (cfg) => {
+    return api.post('/model-config', cfg)
+}
+
 export default api
 
 

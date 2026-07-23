@@ -5,43 +5,73 @@
         <div class="header-left">
           <h1 class="site-title" @click="$router.push('/')">测试大纲与用例生成器</h1>
         </div>
-        <nav v-if="showNav" class="header-nav">
+        <div class="header-actions">
+          <nav v-if="showNav" class="header-nav">
+            <el-button
+              text
+              :class="{ 'nav-active': $route.path === '/' }"
+              @click="$router.push('/')"
+            >
+              首页
+            </el-button>
+            <el-button
+              text
+              :class="{ 'nav-active': $route.path === '/outline-to-cases' }"
+              @click="$router.push('/outline-to-cases')"
+            >
+              大纲转用例
+            </el-button>
+            <el-button
+              text
+              :class="{ 'nav-active': $route.path === '/outline-generation' }"
+              @click="$router.push('/outline-generation')"
+            >
+              需求生成大纲
+            </el-button>
+          </nav>
+          <el-tag v-if="currentModel" class="model-tag" effect="dark" round>
+            <el-icon class="model-tag-icon"><Cpu /></el-icon>{{ currentModel === 'auto' ? 'auto · 轮转' : currentModel }}
+          </el-tag>
           <el-button
-            text
-            :class="{ 'nav-active': $route.path === '/' }"
-            @click="$router.push('/')"
-          >
-            首页
-          </el-button>
-          <el-button
-            text
-            :class="{ 'nav-active': $route.path === '/outline-to-cases' }"
-            @click="$router.push('/outline-to-cases')"
-          >
-            大纲转用例
-          </el-button>
-          <el-button
-            text
-            :class="{ 'nav-active': $route.path === '/outline-generation' }"
-            @click="$router.push('/outline-generation')"
-          >
-            需求生成大纲
-          </el-button>
-        </nav>
+            class="config-btn"
+            :icon="Setting"
+            circle
+            title="模型配置"
+            @click="configVisible = true"
+          />
+        </div>
       </div>
     </el-header>
     <el-main>
       <router-view />
     </el-main>
+    <ModelConfigDialog v-model="configVisible" @saved="loadCurrentModel" />
   </el-container>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { Setting, Cpu } from '@element-plus/icons-vue'
+import { getModelConfig } from './utils/api'
+import ModelConfigDialog from './components/ModelConfigDialog.vue'
 
 const route = useRoute()
 const showNav = computed(() => route.path !== '/')
+
+const configVisible = ref(false)
+const currentModel = ref('')
+
+const loadCurrentModel = async () => {
+  try {
+    const data = await getModelConfig()
+    currentModel.value = data.effective_model || ''
+  } catch (e) {
+    // 顶部模型展示非关键，静默失败
+  }
+}
+
+onMounted(loadCurrentModel)
 </script>
 
 <style scoped>
@@ -86,6 +116,12 @@ const showNav = computed(() => route.path !== '/')
   opacity: 0.9;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .header-nav {
   display: flex;
   align-items: center;
@@ -109,6 +145,37 @@ const showNav = computed(() => route.path !== '/')
   color: white;
   background: rgba(255, 255, 255, 0.2);
   font-weight: 500;
+}
+
+.model-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 240px;
+}
+
+.model-tag :deep(.el-tag__content) {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-tag-icon {
+  margin-right: 4px;
+}
+
+.config-btn {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.config-btn:hover,
+.config-btn:focus {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.28);
+  border-color: rgba(255, 255, 255, 0.7);
 }
 
 .el-main {
