@@ -1,7 +1,7 @@
 <template>
   <div class="case-container" :class="{ expanded: parsedData }">
     <el-tabs v-model="activeTab" class="case-tabs" stretch>
-      <el-tab-pane label="生成用例" name="generate">
+      <el-tab-pane label="生成案例" name="generate">
         <el-card class="upload-card" shadow="hover">
       <template #header>
         <div class="card-header">
@@ -113,9 +113,15 @@
         </div>
       </template>
       <el-table :data="previewCases" border style="width: 100%">
-        <el-table-column prop="point_type" label="类型" width="80" />
-        <el-table-column prop="subtype" label="子类型" width="90" />
-        <el-table-column prop="priority" label="优先级" width="80" />
+        <el-table-column prop="point_type" label="类型" width="80">
+          <template #default="{ row }">{{ typeMap[row.point_type] || row.point_type }}</template>
+        </el-table-column>
+        <el-table-column prop="subtype" label="子类型" width="90">
+          <template #default="{ row }">{{ subtypeMap[row.subtype] || row.subtype }}</template>
+        </el-table-column>
+        <el-table-column prop="priority" label="优先级" width="80">
+          <template #default="{ row }">{{ priorityMap[row.priority] || row.priority }}</template>
+        </el-table-column>
         <el-table-column prop="text" label="测试点" min-width="220" />
         <el-table-column label="前提条件" min-width="200">
           <template #default="{ row }">
@@ -210,7 +216,7 @@
     </el-dialog>
       </el-tab-pane>
 
-      <el-tab-pane label="按Session导出" name="session">
+      <el-tab-pane label="导出案例" name="session">
         <el-card class="session-card" shadow="hover">
           <template #header>
             <div class="card-header">
@@ -232,7 +238,7 @@
         </el-card>
       </el-tab-pane>
 
-      <el-tab-pane label="导入案例" name="import">
+      <el-tab-pane label="案例统计" name="import">
 
         <!-- 模块1: 导入文件 -->
         <el-card class="import-file-card" shadow="hover">
@@ -352,6 +358,10 @@ import {
 const uploadRef = ref(null)
 const fileList = ref([])
 const parsing = ref(false)
+const typeMap = { process: '流程', rule: '规则', page_control: '页面' }
+const subtypeMap = { positive: '正例', negative: '反例' }
+const priorityMap = { 1: '高', 2: '中', 3: '低', '1': '高', '2': '中', '3': '低' }
+
 const previewing = ref(false)
 const parsedData = ref(null)
 const previewCases = ref([])
