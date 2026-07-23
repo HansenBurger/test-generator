@@ -18,12 +18,14 @@ from app.models.schemas import (
     TaskCreateResponse, TaskStatusResponse,
     ParseXmindResponse, PreviewGenerateRequest, PreviewGenerateResponse,
     ConfirmPreviewRequest, BulkGenerateRequest, GenerationStatusResponse,
-    RetryGenerationRequest, ExportCasesRequest, GenerationRecordResponse, ParsedXmindDocument, TestCase
+    RetryGenerationRequest, ExportCasesRequest, GenerationRecordResponse, ParsedXmindDocument, TestCase,
+    ModelConfigUpdate, ModelConfigResponse
 )
 from app.services.doc_parser import DocumentParser
 from app.services.xmind_generator import XMindGenerator
 from app.services.xmind_parser import XMindParser
 from app.services.case_generation import case_generation_manager
+from app.services.ai_client import get_config_view, apply_model_config
 from app.services.case_xmind_generator import CaseXMindGenerator
 from app.utils.logger import api_logger, parser_logger, generator_logger
 from app.utils.task_manager import task_manager, TaskStatus
@@ -37,6 +39,60 @@ router = APIRouter()
 async def health_check():
     """健康检查端点"""
     return {"status": "ok", "message": "API服务正常运行"}
+
+
+@router.get("/model-config")
+async def get_model_config():
+    """获取运行时模型配置与可选模型列表"""
+    return get_config_view()
+
+
+@router.post("/model-config", response_model=ModelConfigResponse)
+async def update_model_config(request: ModelConfigUpdate):
+    """更新运行时模型配置（持久化到数据库，立即生效）"""
+    apply_model_config(
+        enable_thinking=request.enable_thinking,
+        thinking_token_buffer=request.thinking_token_buffer,
+        current_model=request.current_model,
+        temperature=request.temperature,
+        model_mode=request.model_mode,
+    )
+    return get_config_view()
+
+
+def _friendly_ai_error(exc: Exception) -> str:
+    """将 openai SDK 异常转为用户友好的中文提示。"""
+    msg = str(exc)
+    # 额度/未开通
+    if "not activated" in msg.lower() or "product is not activated" in msg.lower():
+        return "所选模型未开通，请在面板切换模型或配置白名单"
+    if "quota" in msg.lower() or "insufficient" in msg.lower() or "balance" in msg.lower():
+        return "模型额度不足，请切换模型或充值"
+    if "throttl" in msg.lower() or "rate limit" in msg.lower() or "429" in msg:
+        return "模型请求被限流，请稍后重试或切换模型"
+    # 模型不存在
+    if "not found" in msg.lower() or "does not exist" in msg.lower():
+        return "模型不存在或已下线，请在面板切换模型"
+    # 认证失败
+    if "401" in msg or "invalid_api_key" in msg.lower() or "incorrect api key" in msg.lower():
+        return "API Key 无效，请检查配置"
+    # 超时/连接
+    if "timeout" in msg.lower() or "timed out" in msg.lower():
+        return "模型响应超时，请稍后重试"
+    if "connection" in msg.lower() or "connect" in msg.lower():
+        return "无法连接模型服务，请检查网络或网关配置"
+    # 内容安全
+    if "content_filter" in msg.lower() or "data_inspection" in msg.lower():
+        return "内容触发安全审核，请调整输入后重试"
+    # JSON 解析失败（模型输出格式问题）
+    if "JSON" in msg or "json" in msg:
+        return "模型返回格式异常，请重试或降低温度"
+    # 内容为空
+    if "内容为空" in msg:
+        return "模型未返回有效内容，请检查思考模式/余量配置后重试"
+    # 兜底：截取前 120 字符
+    brief = msg[:120].replace("\n", " ")
+    return f"模型调用失败：{brief}"
 
 
 def sanitize_error_message(error_msg: str, filename: str) -> str:
@@ -573,7 +629,7 @@ async def preview_generate(request: PreviewGenerateRequest):
         )
     except Exception as exc:
         api_logger.error(f"预生成失败 - 错误: {str(exc)}", exc_info=True)
-        return PreviewGenerateResponse(success=False, message=f"预生成失败：{str(exc)}")
+        return PreviewGenerateResponse(success=False, message=f"预生成失败：{_friendly_ai_error(exc)}")
 
 
 @router.post("/confirm-preview", response_model=TaskCreateResponse)
