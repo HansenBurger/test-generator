@@ -370,6 +370,7 @@ import {
   exportCasesBySession,
   exportCasesBySessionWithHeaders
 } from '../utils/api'
+import { acquireModelConfigLock, releaseModelConfigLock, releaseAllModelConfigLocks } from '../utils/generationLock'
 
 const uploadRef = ref(null)
 const fileList = ref([])
@@ -648,6 +649,7 @@ const handlePreview = async () => {
     return
   }
   previewing.value = true
+  acquireModelConfigLock('preview', '预生成调用模型中，模型配置暂时锁定')
   try {
     const res = await previewGenerate(parsedData.value.parse_id, 4)
     if (!res.success) {
@@ -660,6 +662,7 @@ const handlePreview = async () => {
     ElMessage.error(error.message || '预生成失败')
   } finally {
     previewing.value = false
+    releaseModelConfigLock('preview')
   }
 }
 
@@ -675,6 +678,7 @@ const handleConfirm = async () => {
     }
     generationTaskId.value = res.task_id
     currentSessionId.value = res.session_id || ''
+    acquireModelConfigLock('task', '批量生成进行中，模型配置暂时锁定')
     startPolling(res.task_id)
     ElMessage.success(`生成任务已提交${res.session_id ? `，session_id: ${res.session_id}` : ''}`)
   } catch (error) {
@@ -694,6 +698,7 @@ const handleBulkGenerate = async () => {
     }
     generationTaskId.value = res.task_id
     currentSessionId.value = res.session_id || ''
+    acquireModelConfigLock('task', '批量生成进行中，模型配置暂时锁定')
     startPolling(res.task_id)
     ElMessage.success(`生成任务已提交${res.session_id ? `，session_id: ${res.session_id}` : ''}`)
   } catch (error) {
@@ -714,11 +719,13 @@ const startPolling = async (taskId) => {
       }
       if (status.status === 'completed' || status.status === 'failed') {
         stopPolling()
+        releaseModelConfigLock('task')
         return
       }
     } catch (error) {
       ElMessage.error(error.message || '查询任务失败')
       stopPolling()
+      releaseModelConfigLock('task')
       return
     }
     pollTimer = setTimeout(poll, 2000)
@@ -734,6 +741,7 @@ const stopPolling = () => {
 }
 
 const resetAll = () => {
+  releaseAllModelConfigLocks()
   parsedData.value = null
   previewCases.value = []
   previewId.value = ''
@@ -1095,6 +1103,7 @@ const handleExportCsv = () => {
 
 onBeforeUnmount(() => {
   stopPolling()
+  releaseAllModelConfigLocks()
 })
 
 const resolveDownloadName = (contentDisposition, requirementName) => {

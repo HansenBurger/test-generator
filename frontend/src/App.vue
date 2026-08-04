@@ -36,8 +36,9 @@
             class="config-btn"
             :icon="Setting"
             circle
-            title="模型配置"
-            @click="configVisible = true"
+            :disabled="modelConfigLocked"
+            :title="modelConfigLocked ? lockReason : '模型配置'"
+            @click="openConfig"
           />
         </div>
       </div>
@@ -54,6 +55,7 @@ import { computed, ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Setting, Cpu } from '@element-plus/icons-vue'
 import { getModelConfig } from './utils/api'
+import { modelConfigLocked, lockReason } from './utils/generationLock'
 import ModelConfigDialog from './components/ModelConfigDialog.vue'
 
 const route = useRoute()
@@ -61,6 +63,14 @@ const showNav = computed(() => route.path !== '/')
 
 const configVisible = ref(false)
 const currentModel = ref('')
+
+const openConfig = () => {
+  // 预生成/批量生成调用模型期间禁止修改配置
+  if (modelConfigLocked.value) {
+    return
+  }
+  configVisible.value = true
+}
 
 const loadCurrentModel = async () => {
   try {
@@ -176,6 +186,15 @@ onMounted(loadCurrentModel)
   color: #fff;
   background: rgba(255, 255, 255, 0.28);
   border-color: rgba(255, 255, 255, 0.7);
+}
+
+.config-btn.is-disabled,
+.config-btn.is-disabled:hover,
+.config-btn.is-disabled:focus {
+  color: rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+  cursor: not-allowed;
 }
 
 .el-main {
