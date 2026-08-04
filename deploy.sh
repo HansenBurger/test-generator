@@ -349,6 +349,8 @@ update_dist() {
         if [ -d "frontend/dist" ]; then
             rm -r frontend/dist
         fi
+        # 内网 docker 部署的宿主机可能没有 frontend/ 目录，先创建再解压
+        mkdir -p frontend
         tar -xzf frontend-dist.tar.gz -C frontend
     fi
 
