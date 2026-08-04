@@ -335,18 +335,7 @@
                 <el-tag v-if="row.category === 'rule_alias'" size="small" type="info" class="alias-tag">规则简称</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="案例数" width="110" align="center">
-              <template #default="{ row }">
-                <el-tooltip
-                  v-if="row.category !== 'rule_alias' && row.alias_count > 0"
-                  :content="`功能步骤案例 ${row.count} 条，规则简称案例 ${row.alias_count} 条（展开查看），合计 ${row.count + row.alias_count} 条`"
-                  placement="top"
-                >
-                  <span>{{ row.count }} <span class="alias-extra">+{{ row.alias_count }}</span></span>
-                </el-tooltip>
-                <span v-else>{{ row.count }}</span>
-              </template>
-            </el-table-column>
+            <el-table-column prop="count" label="案例数" width="100" align="center" />
             <el-table-column prop="process" label="流程" width="80" align="center" />
             <el-table-column prop="rule" label="规则" width="80" align="center" />
             <el-table-column prop="page_control" label="页面" width="100" align="center" />
@@ -478,7 +467,6 @@ const importStats = computed(() => {
   const ensureGroup = (groupKey, component) => {
     if (!groups[groupKey]) {
       const row = newStatsRow(`g_${groupOrder.length}_${groupKey}`, groupKey, component, 'function_step')
-      row.alias_count = 0
       row._aliases = {}
       groups[groupKey] = row
       groupOrder.push(groupKey)
@@ -521,11 +509,17 @@ const importStats = computed(() => {
     }
 
     const g = ensureGroup(groupKey, component)
+    // 主行（功能/步骤）合计全部案例（含其下规则简称），
+    // 案例数与流程/规则/页面/正例/反例/优先级/自动化均为总数
+    accumulateStats(g, point)
     if (!alias) {
-      accumulateStats(g, point)
       continue
     }
 
+    // 规则简称子行只统计业务规则案例
+    if (point.point_type !== 'rule') {
+      continue
+    }
     if (!g._aliases[alias]) {
       g._aliases[alias] = newStatsRow(
         `${g.rowKey}_a_${Object.keys(g._aliases).length}`,
@@ -535,7 +529,6 @@ const importStats = computed(() => {
       )
     }
     accumulateStats(g._aliases[alias], point)
-    g.alias_count++
   }
 
   return groupOrder.map((key) => {
@@ -550,8 +543,15 @@ const importStats = computed(() => {
   })
 })
 
+// 规则简称案例数（子行合计，仅业务规则案例）
 const importAliasTotal = computed(() => {
-  return importStats.value.reduce((sum, row) => sum + (row.alias_count || 0), 0)
+  let total = 0
+  for (const row of importStats.value) {
+    for (const child of row.children || []) {
+      total += child.count
+    }
+  }
+  return total
 })
 
 const importTypeCounts = computed(() => {
@@ -922,63 +922,175 @@ const resetImport = () => {
 }
 
 
+// ---------- CSV / ZIP 导出工具 ----------
+const csvEscape = (v) => {
+  const s = String(v)
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"'
+  }
+  return s
+}
+
+// withAliases=false：仅功能/步骤行；true：功能/步骤行 + 规则简称子行（全展开）
+const buildStatsCsv = (rows, withAliases) => {
+  const statHeaders = ['案例数', '流程', '规则', '页面', '正例', '反例', '优先级(高)', '优先级(中)', '优先级(低)', '自动化']
+  const headers = withAliases
+    ? ['组件', '功能/步骤', '类别', ...statHeaders]
+    : ['组件', '功能/步骤', ...statHeaders]
+  const statValues = (row) => [
+    row.count, row.process, row.rule, row.page_control,
+    row.positive, row.negative,
+    row.priority1, row.priority2, row.priority3,
+    row.automated
+  ]
+  const lines = [headers.join(',')]
+  for (const row of rows) {
+    const base = [row.component || '', row.function || '']
+    lines.push((withAliases ? [...base, '功能步骤', ...statValues(row)] : [...base, ...statValues(row)]).map(csvEscape).join(','))
+    if (withAliases) {
+      for (const child of row.children || []) {
+        lines.push([
+          row.component || '',
+          `${row.function || ''} / ${child.function || ''}`,
+          '规则简称',
+          ...statValues(child)
+        ].map(csvEscape).join(','))
+      }
+    }
+  }
+  return '\ufeff' + lines.join('\n')
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
+    table[n] = c >>> 0
+  }
+  return table
+})()
+
+const crc32 = (bytes) => {
+  let crc = 0xFFFFFFFF
+  for (let i = 0; i < bytes.length; i++) {
+    crc = (CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8)) >>> 0
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0
+}
+
+// 生成 ZIP（store 方式，不压缩）：files = [{ name, data: Uint8Array }]
+const buildZip = (files) => {
+  const encoder = new TextEncoder()
+  const now = new Date()
+  const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF
+  const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF
+  const chunks = []
+  const centralChunks = []
+  let offset = 0
+  let centralSize = 0
+
+  for (const file of files) {
+    const nameBytes = encoder.encode(file.name)
+    const data = file.data
+    const crc = crc32(data)
+
+    const local = new DataView(new ArrayBuffer(30))
+    local.setUint32(0, 0x04034B50, true)
+    local.setUint16(4, 20, true)          // 解压所需版本
+    local.setUint16(6, 0x0800, true)      // 文件名 UTF-8
+    local.setUint16(8, 0, true)           // store 不压缩
+    local.setUint16(10, dosTime, true)
+    local.setUint16(12, dosDate, true)
+    local.setUint32(14, crc, true)
+    local.setUint32(18, data.length, true)
+    local.setUint32(22, data.length, true)
+    local.setUint16(26, nameBytes.length, true)
+    local.setUint16(28, 0, true)
+    chunks.push(new Uint8Array(local.buffer), nameBytes, data)
+
+    const central = new DataView(new ArrayBuffer(46))
+    central.setUint32(0, 0x02014B50, true)
+    central.setUint16(4, 20, true)
+    central.setUint16(6, 20, true)
+    central.setUint16(8, 0x0800, true)
+    central.setUint16(10, 0, true)
+    central.setUint16(12, dosTime, true)
+    central.setUint16(14, dosDate, true)
+    central.setUint32(16, crc, true)
+    central.setUint32(20, data.length, true)
+    central.setUint32(24, data.length, true)
+    central.setUint16(28, nameBytes.length, true)
+    central.setUint16(30, 0, true)
+    central.setUint16(32, 0, true)
+    central.setUint16(34, 0, true)
+    central.setUint16(36, 0, true)
+    central.setUint32(38, 0, true)
+    central.setUint32(42, offset, true)
+    centralChunks.push(new Uint8Array(central.buffer), nameBytes)
+
+    offset += 30 + nameBytes.length + data.length
+    centralSize += 46 + nameBytes.length
+  }
+
+  const eocd = new DataView(new ArrayBuffer(22))
+  eocd.setUint32(0, 0x06054B50, true)
+  eocd.setUint16(4, 0, true)
+  eocd.setUint16(6, 0, true)
+  eocd.setUint16(8, files.length, true)
+  eocd.setUint16(10, files.length, true)
+  eocd.setUint32(12, centralSize, true)
+  eocd.setUint32(16, offset, true)
+  eocd.setUint16(20, 0, true)
+
+  const out = new Uint8Array(offset + centralSize + 22)
+  let pos = 0
+  for (const chunk of [...chunks, ...centralChunks, new Uint8Array(eocd.buffer)]) {
+    out.set(chunk, pos)
+    pos += chunk.length
+  }
+  return out
+}
+
+const downloadBlob = (blob, filename) => {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
 const handleExportCsv = () => {
   const rows = importStats.value
   if (!rows.length) {
     ElMessage.warning('暂无统计数据可导出')
     return
   }
-  const headers = ['组件', '功能/步骤', '类别', '案例数', '流程', '规则', '页面', '正例', '反例', '优先级(高)', '优先级(中)', '优先级(低)', '自动化']
-  const csvRows = [headers.join(',')]
-  // 展开树形结构：功能/步骤主行 + 其下规则简称子行（功能/步骤列带出归属）
-  const flatRows = []
-  for (const row of rows) {
-    flatRows.push({ ...row, csvFunction: row.function || '', categoryLabel: '功能步骤' })
-    for (const child of row.children || []) {
-      flatRows.push({
-        ...child,
-        component: row.component || '',
-        csvFunction: `${row.function || ''} / ${child.function || ''}`,
-        categoryLabel: '规则简称'
-      })
-    }
-  }
-  for (const row of flatRows) {
-    const values = [
-      row.component || '',
-      row.csvFunction,
-      row.categoryLabel,
-      row.count,
-      row.process,
-      row.rule,
-      row.page_control,
-      row.positive,
-      row.negative,
-      row.priority1,
-      row.priority2,
-      row.priority3,
-      row.automated
-    ].map(v => {
-      const s = String(v)
-      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-        return '"' + s.replace(/"/g, '""') + '"'
-      }
-      return s
-    })
-    csvRows.push(values.join(','))
-  }
-  const BOM = '\ufeff'
-  const blob = new Blob([BOM + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
   const baseName = importRequirementName.value || importFileName.value.replace(/\.[^.]+$/, '') || '案例统计'
-  link.download = `${baseName}_${formatTimestamp()}.csv`
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
-  ElMessage.success('CSV 导出成功')
+  const ts = formatTimestamp()
+  const encoder = new TextEncoder()
+  const hasAlias = rows.some((row) => (row.children || []).length > 0)
+
+  // 无规则简称：单份 CSV
+  if (!hasAlias) {
+    const blob = new Blob([buildStatsCsv(rows, false)], { type: 'text/csv;charset=utf-8;' })
+    downloadBlob(blob, `${baseName}_案例统计_${ts}.csv`)
+    ElMessage.success('CSV 导出成功')
+    return
+  }
+
+  // 有规则简称：两份 CSV 打包为 ZIP
+  //  1) 仅功能/步骤（数量为含规则简称的合计）
+  //  2) 全展开（功能/步骤 + 规则简称子行）
+  const zipBytes = buildZip([
+    { name: `${baseName}_仅功能步骤_${ts}.csv`, data: encoder.encode(buildStatsCsv(rows, false)) },
+    { name: `${baseName}_含规则简称全展开_${ts}.csv`, data: encoder.encode(buildStatsCsv(rows, true)) }
+  ])
+  downloadBlob(new Blob([zipBytes], { type: 'application/zip' }), `${baseName}_案例统计_${ts}.zip`)
+  ElMessage.success('已导出压缩包：含 仅功能步骤 与 含规则简称全展开 两份 CSV')
 }
 
 onBeforeUnmount(() => {
@@ -1210,8 +1322,4 @@ const formatTimestamp = () => {
   margin-left: 8px;
 }
 
-.alias-extra {
-  color: #909399;
-  font-size: 12px;
-}
 </style>
