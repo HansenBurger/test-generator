@@ -140,13 +140,17 @@ class XMindParser:
                     alias_automated = section_automated or self._has_automation_marker(child)
                     for alias_child in self._get_children(child):
                         child_auto = alias_automated or self._has_automation_marker(alias_child)
+                        # 规则简称归属于功能步骤层：alias_child 与功能步骤同级，
+                        # 深度预算与功能步骤保持一致（depth_offset=0），
+                        # 否则 前提/步骤/预期 三层链会被截断、丢失预期层
                         self._parse_test_point(
                             alias_child,
                             point_type,
                             alias_context,
                             points,
-                            depth_offset=1,
-                            is_automated=child_auto
+                            depth_offset=0,
+                            is_automated=child_auto,
+                            rule_alias=alias_title
                         )
                     continue
                 child_automated = section_automated or self._has_automation_marker(child)
@@ -240,19 +244,40 @@ class XMindParser:
         return False
 
     def _has_contact_marker(self, topic: ET.Element) -> bool:
-        for elem in topic.iter():
-            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-            if tag != "marker-ref":
-                continue
-            marker_id = (elem.attrib.get("marker-id", "") or "").lower()
-            if "contact" in marker_id:
+        # 只读节点自身的 marker：规则简称是节点本身带"联系"标注，
+        # 不能把子孙 topic 上的联系标注误判到父节点上
+        for marker_id in self._iter_own_marker_ids(topic):
+            if "contact" in marker_id.lower():
                 return True
+        return False
+
+    def _iter_own_marker_ids(self, topic: ET.Element) -> List[str]:
+        """读取 topic 自身的 marker-id 列表（不穿透到嵌套的子 topic）。
+
+        兼容两种存储形式：
+        - XMind8：marker-refs/marker-ref 作为 topic 的直接子元素
+        - 旧格式：markers 属性逗号分隔挂在 topic 上
+        """
+        marker_ids: List[str] = []
+
+        def walk(elem: ET.Element, is_root: bool):
+            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if not is_root and tag == "topic":
+                # 进入嵌套 topic 后其 marker 属于子节点，不属于当前节点
+                return
+            if tag == "marker-ref":
+                marker_id = elem.attrib.get("marker-id", "")
+                if marker_id:
+                    marker_ids.append(marker_id)
+            for child in elem:
+                walk(child, False)
+
+        walk(topic, True)
+
         marker_attr = topic.attrib.get("markers", "")
         if marker_attr:
-            for marker_id in [m.strip().lower() for m in marker_attr.split(",") if m.strip()]:
-                if "contact" in marker_id:
-                    return True
-        return False
+            marker_ids.extend([m.strip() for m in marker_attr.split(",") if m.strip()])
+        return marker_ids
 
 
     def _has_automation_marker(self, topic: ET.Element) -> bool:
@@ -288,7 +313,8 @@ class XMindParser:
         preconditions: Optional[List[str]] = None,
         steps: Optional[List[str]] = None,
         expected_results: Optional[List[str]] = None,
-        is_automated: bool = False
+        is_automated: bool = False,
+        rule_alias: Optional[str] = None
     ):
         points.append(
             TestPoint(
@@ -302,7 +328,8 @@ class XMindParser:
                 steps=steps or [],
                 expected_results=expected_results or [],
                 manual_case=manual_case,
-                is_automated=is_automated
+                is_automated=is_automated,
+                rule_alias=rule_alias
             )
         )
 
@@ -313,7 +340,8 @@ class XMindParser:
         context: str,
         points: List[TestPoint],
         depth_offset: int = 0,
-        is_automated: bool = False
+        is_automated: bool = False,
+        rule_alias: Optional[str] = None
     ):
         node_title = self._get_title(node)
         if not node_title:
@@ -330,7 +358,7 @@ class XMindParser:
 
         if effective_depth == 0 or not children:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated, rule_alias=rule_alias)
             self._total_count += 1
             return
 
@@ -342,11 +370,12 @@ class XMindParser:
                 child_priority, child_cleaned = self._parse_priority(child, child_title)
                 merged_title = self._merge_titles(cleaned_title, child_cleaned)
                 subtype = self._detect_subtype(merged_title)
-                # 兼容“用例型XMind”：
-                # 子节点经常是“1、2、3”编号（前提/步骤/预期），不应覆盖父节点优先级。
-                # 因此父节点优先级优先，仅在父节点缺失时才回退子节点。
-                effective_priority = priority or child_priority
-                self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated)
+                # 优先级传播（子->父）：
+                # 优先级只认 priority marker，步骤编号“1、2、3”不会被误判；
+                # 子节点有标注时以子节点优先级为准（即使与父节点不一致），
+                # 子节点未标注才回退父节点。
+                effective_priority = self._resolve_priority(child_priority, priority)
+                self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated, rule_alias=rule_alias)
             self._total_count += len(children)
             return
 
@@ -376,14 +405,24 @@ class XMindParser:
                 if not depth3_title:
                     chains = []
                     break
-                chains.append((child_priority, child_cleaned, depth2_title, depth3_title, depth3_node))
+                depth2_priority = self._get_marker_priority(depth2_node)
+                depth3_priority = self._get_marker_priority(depth3_node)
+                chains.append(
+                    (child_priority, child_cleaned, depth2_title, depth3_title,
+                     depth3_node, depth2_priority, depth3_priority)
+                )
             if chains:
-                for child_priority, child_cleaned, depth2_title, depth3_title, depth3_node in chains:
+                for (child_priority, child_cleaned, depth2_title, depth3_title,
+                     depth3_node, depth2_priority, depth3_priority) in chains:
                     if self._has_wrong_marker(depth3_node):
                         subtype = "negative"
                     else:
                         subtype = self._detect_subtype(depth3_title)
-                    effective_priority = priority or child_priority
+                    # 优先级传播（子->父）：前提/步骤/预期任一节点标注了优先级，
+                    # 以最深处的标注为准；都未标注才回退测试点节点自身。
+                    effective_priority = self._resolve_priority(
+                        depth3_priority, depth2_priority, child_priority, priority
+                    )
                     self._append_point(
                         points,
                         point_type,
@@ -395,14 +434,15 @@ class XMindParser:
                         preconditions=[child_cleaned],
                         steps=[depth2_title],
                         expected_results=[depth3_title],
-                        is_automated=node_automated
+                        is_automated=node_automated,
+                        rule_alias=rule_alias
                     )
                 self._total_count += len(chains)
                 return
 
         if len(children) != 1:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated, rule_alias=rule_alias)
             self._total_count += 1
             return
 
@@ -410,7 +450,7 @@ class XMindParser:
         depth1_title = self._get_title(depth1_node)
         if not depth1_title:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated, rule_alias=rule_alias)
             self._total_count += 1
             return
         depth1_priority, depth1_cleaned = self._parse_priority(depth1_node, depth1_title)
@@ -420,7 +460,7 @@ class XMindParser:
         if effective_depth == 2:
             if not depth2_nodes:
                 subtype = self._detect_subtype(cleaned_title)
-                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated, rule_alias=rule_alias)
                 self._total_count += 1
                 return
             appended_count = 0
@@ -428,14 +468,16 @@ class XMindParser:
                 child_title = self._get_title(child)
                 if not child_title:
                     continue
-                merged_title = self._merge_titles(base_title, child_title)
+                child_priority, child_cleaned = self._parse_priority(child, child_title)
+                merged_title = self._merge_titles(base_title, child_cleaned)
                 subtype = self._detect_subtype(merged_title)
-                effective_priority = priority or depth1_priority
-                self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated)
+                # 优先级传播（子->父）：深度2节点标注优先 -> 深度1 -> 测试点节点
+                effective_priority = self._resolve_priority(child_priority, depth1_priority, priority)
+                self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated, rule_alias=rule_alias)
                 appended_count += 1
             if appended_count == 0:
                 subtype = self._detect_subtype(cleaned_title)
-                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated, rule_alias=rule_alias)
                 self._total_count += 1
                 return
             self._total_count += appended_count
@@ -443,7 +485,7 @@ class XMindParser:
 
         if not depth2_nodes:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated, rule_alias=rule_alias)
             self._total_count += 1
             return
 
@@ -458,7 +500,7 @@ class XMindParser:
             depth3_nodes = self._get_effective_children(depth2_node, point_type)
             if len(depth3_nodes) != 1:
                 subtype = self._detect_subtype(cleaned_title)
-                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
+                self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated, rule_alias=rule_alias)
                 self._total_count += 1
                 return
 
@@ -472,13 +514,18 @@ class XMindParser:
                 subtype = "negative"
             else:
                 subtype = self._detect_subtype(merged_title)
-            effective_priority = priority or depth1_priority
-            self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated)
+            depth2_priority = self._get_marker_priority(depth2_node)
+            depth3_priority = self._get_marker_priority(depth3_node)
+            # 优先级传播（子->父）：深度3 -> 深度2 -> 深度1 -> 测试点节点
+            effective_priority = self._resolve_priority(
+                depth3_priority, depth2_priority, depth1_priority, priority
+            )
+            self._append_point(points, point_type, effective_priority, subtype, context, merged_title, is_automated=node_automated, rule_alias=rule_alias)
             appended_count += 1
 
         if appended_count == 0:
             subtype = self._detect_subtype(cleaned_title)
-            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated)
+            self._append_point(points, point_type, priority, subtype, context, cleaned_title, is_automated=node_automated, rule_alias=rule_alias)
             self._total_count += 1
             return
         self._total_count += appended_count
@@ -492,24 +539,23 @@ class XMindParser:
         return None, title.strip()
 
     def _get_marker_priority(self, topic: ET.Element) -> Optional[int]:
-        # XMind8 Update9: marker-ref 可能在 topic 子节点中嵌套
-        for elem in topic.iter():
-            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-            if tag != "marker-ref":
-                continue
-            marker_id = elem.attrib.get("marker-id", "")
+        # 只读节点自身的优先级 marker（priority-1/2/3）。
+        # 不能用 topic.iter() 遍历整棵子树，否则父节点会"窃取"子孙节点的优先级，
+        # 优先级应通过显式的子->父传播规则逐层决定（见 _resolve_priority）。
+        for marker_id in self._iter_own_marker_ids(topic):
             match = re.match(r"priority-(\d)", marker_id)
             if match:
                 return int(match.group(1))
+        return None
 
-        # 兼容 markers 属性（逗号分隔）
-        marker_attr = topic.attrib.get("markers", "")
-        if marker_attr:
-            for marker_id in [m.strip() for m in marker_attr.split(",") if m.strip()]:
-                match = re.match(r"priority-(\d)", marker_id)
-                if match:
-                    return int(match.group(1))
-
+    @staticmethod
+    def _resolve_priority(*priorities: Optional[int]) -> Optional[int]:
+        """优先级传播（子->父）：按"从最深节点到最浅节点"传入，
+        取第一个非空优先级。即子节点有标注时以子节点为准，
+        子节点未标注才回退到父节点。"""
+        for priority in priorities:
+            if priority in (1, 2, 3):
+                return priority
         return None
 
     def _detect_subtype(self, text: str) -> Optional[str]:
@@ -538,7 +584,8 @@ class XMindParser:
             "by_type": {"process": 0, "rule": 0, "page_control": 0},
             "by_priority": {"1": 0, "2": 0, "3": 0, "unknown": 0},
             "by_subtype": {"positive": 0, "negative": 0, "unknown": 0},
-            "by_automation": {"automated": 0, "manual": 0}
+            "by_automation": {"automated": 0, "manual": 0},
+            "by_source": {"function_step": 0, "rule_alias": 0}
         }
 
         for point in points:
@@ -555,5 +602,9 @@ class XMindParser:
                 stats["by_automation"]["automated"] += 1
             else:
                 stats["by_automation"]["manual"] += 1
+            if point.rule_alias:
+                stats["by_source"]["rule_alias"] += 1
+            else:
+                stats["by_source"]["function_step"] += 1
 
         return stats
