@@ -180,7 +180,21 @@
 
 ## 组合：代码级增量更新（前后端都只改代码、无新增依赖时推荐）
 
-不需要更新全量镜像/基础镜像，组合 **方式五 + 方式二** 即可（两个包合计约几MB）：
+不需要更新全量镜像/基础镜像，组合 **方式五 + 方式二** 即可（两个包合计约几MB）。
+
+### 0. 每次更新要同步的文件清单
+
+除两个 tar.gz 包外，以下文件有变更时也要一并覆盖到内网项目目录
+（用 MobaXterm/scp 直接传即可，都是小文件）：
+
+| 文件 | 何时必须同步 |
+| --- | --- |
+| `deploy.sh` / `clear_cache.sh` | 脚本本身有修复时（几乎每次迭代） |
+| `docker-compose.yml` | 服务配置/挂载/环境变量有变更时 |
+| `scripts/` | 新增运维脚本时 |
+
+> **教训：** 曾出现包是新的、但内网 `deploy.sh`/`docker-compose.yml` 是旧的，
+> 导致更新"静默不生效"，排查成本远高于多传两个小文件。
 
 ### 1. 外网侧：打包
 
@@ -189,23 +203,65 @@
 ./deploy.sh export-dist           # 产物 frontend-dist.tar.gz
 ```
 
-### 2. 内网侧：更新（把两个包拷到项目根目录后）
+### 2. 内网侧：更新（把包和清单文件拷到项目根目录后）
 
 ```bash
-# 0) 仅从旧版本升级且 MySQL 账号无 ALTER 权限时需要：
-#    先请 DBA 执行补列 SQL（见"数据库权限与表结构升级"），有 ALTER 权限则跳过
-# 1) 后端：自动备份旧代码、自动沿用 data 目录、自动重启容器
+# 0) 仅当：从旧版本升级 且 MySQL 账号无 ALTER 权限时，先请 DBA 补列
+#    （见"数据库权限与表结构升级"；有 ALTER 权限则跳过）
+
+# 1) 后端代码热更新（自动备份旧代码、自动沿用 data 目录、自动重启容器）
 ./deploy.sh update-backend-code
-# 2) 前端：热更新 dist
+
+# 2) 若本次覆盖了 docker-compose.yml：重建容器使配置生效
+docker-compose up -d          # 或 docker compose up -d（deploy.sh 会自动适配两者）
+
+# 3) 前端 dist 热更新
 ./deploy.sh update-dist
-# 3) 解析逻辑有变化时：软失效解析缓存，让重新上传走新解析（可选）
+
+# 4) 解析逻辑有变化时：软失效解析缓存，让重新上传走新解析
 ./clear_cache.sh
 ```
 
-> `clear_cache.sh` 在无宿主机 Python 依赖时会自动改用 backend 容器执行；
-> 只打无效标志，不删数据。
+> **注意顺序与重建陷阱：**
+> - 第 2 步重建容器后，**必须再执行第 3 步**。`update-dist` 是用 `docker cp`
+>   把 dist 补进"当前容器"的，容器一旦重建（`up -d`、`import-frontend` 等）
+>   就回到镜像里的旧 dist，表现为"前端回老版本"。
+> - 想避免该问题，可把 dist 烤进前端镜像（一次约 10MB）：外网
+>   `export-frontend` → 内网 `import-frontend`，之后重建容器也不再回滚。
+> - 数据不受重建影响：业务数据在 MySQL / 命名数据卷中，不在容器层。
 
 ### 3. 验证
+
+见下一节"更新后验证"。
+
+---
+
+## 更新后验证（看内容，不看时间戳）
+
+目录修改时间、属主都**不可靠**（tar 解压会还原打包时的目录时间戳，属主随
+打包环境）。一律用文件内容验证，且宿主机与容器要分别确认：
+
+```bash
+# 外网先取基准值（示例命令，任意标志性新函数/新字段均可）
+grep -c _resolve_priority backend/app/services/xmind_parser.py
+
+# 内网宿主机代码（应与外网一致；为 0 说明代码包是旧的，重新传包）
+grep -c _resolve_priority backend/app/services/xmind_parser.py
+
+# 内网容器内代码（注意路径是 /app/app/...；为 0 说明挂载未生效，见常见问题 5）
+docker exec test-generator-backend grep -c _resolve_priority /app/app/services/xmind_parser.py
+
+# 前端：页面功能核对 + 必要时强制刷新（Ctrl+Shift+R）
+./deploy.sh status
+```
+
+统计口径对账（可选）：外网解析同一份大纲打印 `stats['by_priority']`，与内网
+前端表格/缓存 JSON 的 `stats.by_priority` 比对；不一致时先想到**旧解析缓存**，
+执行 `./clear_cache.sh` 后重新上传。
+
+---
+
+## 环境配置 (.env)### 3. 验证
 
 ```bash
 ./deploy.sh status
@@ -293,7 +349,7 @@ ALTER TABLE parse_records ADD COLUMN invalidated_at DATETIME;
 ./deploy.sh status
 ```
 
-默认访问地址：
+默认访问地址（端口可在 `.env` 用 `FRONTEND_PORT`/`BACKEND_PORT` 修改）：
 - 前端：`http://<内网IP>:3000`
 - 后端：`http://<内网IP>:8001`
 
@@ -313,9 +369,32 @@ ALTER TABLE parse_records ADD COLUMN invalidated_at DATETIME;
 4) **前端热更新后页面没有变化**
    浏览器可能缓存了旧文件，尝试 `Ctrl+Shift+R`（强制刷新）或清除浏览器缓存。
 
-5) **后端热更新后代码没有生效**
-   确保 `docker-compose.yml` 中后端服务配置了 `volumes: - ./backend:/app`，否则需要走镜像更新流程。
+5) **后端热更新后代码没有生效（宿主机新、容器旧）**
+   容器内 `/app` 必须挂载宿主机 `./backend`。用下面命令确认挂载：
 
-6) **deploy.sh 交互式菜单**
-   直接运行 `./deploy.sh`（不带参数）可进入交互式菜单，查看所有可用操作。
+   ```bash
+   docker inspect test-generator-backend --format '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{println}}{{end}}'
+   ```
+
+   正常应有一行 `bind .../backend -> /app`。若没有：内网的 `docker-compose.yml`
+   是旧版/被改过，把外网仓库的 `docker-compose.yml` 覆盖传过去后
+   `docker-compose up -d`（重建后记得 `update-dist`，见"组合"章节陷阱说明）。
+
+6) **`up -d` 之后前端回老版本**
+   `update-dist` 的热补内容随容器重建丢失。重新执行 `./deploy.sh update-dist`；
+   或改用 `export-frontend` / `import-frontend` 把 dist 烤进镜像，一劳永逸。
+
+7) **服务器只有 `docker-compose`，没有 `docker compose`**
+   正常现象，`deploy.sh` 会自动探测回退到 `docker-compose`，所有子命令照用。
+
+8) **前端端口 3000 被其他服务占用**
+   `.env` 设置 `FRONTEND_PORT=3001`（或其他空闲端口）后 `docker-compose up -d`，
+   访问地址相应变为 `http://<内网IP>:3001`。
+
+9) **后端代码已更新，但案例统计/优先级与外网对不上**
+   大概率是旧解析缓存（缓存按文件哈希复用，解析器升级后不会自动重解析）。
+   执行 `./clear_cache.sh` 软失效后，前端重新上传大纲即可。
+
+10) **deploy.sh 交互式菜单**
+    直接运行 `./deploy.sh`（不带参数）可进入交互式菜单，查看所有可用操作。
    输入 `99` 可查看镜像架构说明。
