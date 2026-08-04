@@ -5,8 +5,15 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional, List
 
+from sqlalchemy import or_
+
 from app.db.database import SessionLocal
 from app.db.models import ParseRecord, GenerationRecord, ModelConfig
+
+
+def _parse_record_valid_filter():
+    """有效解析记录过滤条件：is_invalid 为 NULL 或 False 均视为有效"""
+    return or_(ParseRecord.is_invalid.is_(None), ParseRecord.is_invalid == False)  # noqa: E712
 
 
 @contextmanager
@@ -23,8 +30,14 @@ def get_session():
 
 
 def get_parse_record_by_hash(outline_hash: str) -> Optional[ParseRecord]:
+    # 已失效的解析缓存不参与复用
     with get_session() as session:
-        return session.query(ParseRecord).filter(ParseRecord.outline_hash == outline_hash).first()
+        return (
+            session.query(ParseRecord)
+            .filter(ParseRecord.outline_hash == outline_hash)
+            .filter(_parse_record_valid_filter())
+            .first()
+        )
 
 
 def get_parse_record_by_version_time(
@@ -32,12 +45,14 @@ def get_parse_record_by_version_time(
     version: Optional[str],
     outline_time: Optional[str]
 ) -> Optional[ParseRecord]:
+    # 已失效记录不参与"同版本号+时间"的覆盖流程，重新上传会生成新记录
     with get_session() as session:
         return (
             session.query(ParseRecord)
             .filter(ParseRecord.requirement_name == requirement_name)
             .filter(ParseRecord.version == version)
             .filter(ParseRecord.outline_time == outline_time)
+            .filter(_parse_record_valid_filter())
             .first()
         )
 
@@ -48,10 +63,12 @@ def get_parse_record(parse_id: str) -> Optional[ParseRecord]:
 
 
 def list_parse_records(requirement_name: str) -> List[ParseRecord]:
+    # 历史版本列表仅展示有效记录
     with get_session() as session:
         return (
             session.query(ParseRecord)
             .filter(ParseRecord.requirement_name == requirement_name)
+            .filter(_parse_record_valid_filter())
             .order_by(ParseRecord.upload_time.desc())
             .all()
         )
@@ -118,6 +135,36 @@ def update_parse_record_outline_hash(
             record.upload_time = upload_time
         session.flush()
         return record
+
+
+def invalidate_parse_record(parse_id: str) -> Optional[ParseRecord]:
+    """将单条解析记录标记为失效（软删除）"""
+    with get_session() as session:
+        record = session.query(ParseRecord).filter(ParseRecord.parse_id == parse_id).first()
+        if not record:
+            return None
+        record.is_invalid = True
+        record.invalidated_at = datetime.utcnow()
+        session.flush()
+        return record
+
+
+def invalidate_all_parse_records() -> int:
+    """将所有未失效的解析记录标记为失效（软删除），返回本次打标数量。
+
+    失效后：哈希/版本号缓存复用与历史版本列表均不再命中这些记录，
+    重新上传同一文件会重新解析并生成新记录；旧记录与缓存 JSON 保留用于追溯。
+    """
+    with get_session() as session:
+        count = (
+            session.query(ParseRecord)
+            .filter(_parse_record_valid_filter())
+            .update(
+                {ParseRecord.is_invalid: True, ParseRecord.invalidated_at: datetime.utcnow()},
+                synchronize_session=False,
+            )
+        )
+        return count
 
 
 def get_generation_record(session_id: str) -> Optional[GenerationRecord]:

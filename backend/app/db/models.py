@@ -20,6 +20,9 @@ class ParseRecord(Base):
     test_point_count = Column(Integer, default=0, nullable=False)
     json_path = Column(Text, nullable=True)
     xmind_path = Column(Text, nullable=True)
+    # 软失效标记：缓存清理不再物理删除，仅打标；NULL/False 均视为有效
+    is_invalid = Column(Boolean, nullable=True, default=False)
+    invalidated_at = Column(DateTime, nullable=True)
 
 
 class GenerationRecord(Base):
