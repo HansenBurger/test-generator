@@ -305,6 +305,10 @@
               <div class="summary-value">{{ importStats.length }}</div>
             </div>
             <div class="summary-item">
+              <div class="summary-label">规则简称案例</div>
+              <div class="summary-value">{{ importAliasTotal }}</div>
+            </div>
+            <div class="summary-item">
               <div class="summary-label">类型分布</div>
               <div class="summary-value">
                 {{ importTypeCounts.process }}/{{ importTypeCounts.rule }}/{{ importTypeCounts.page_control }}
@@ -316,10 +320,33 @@
             </div>
           </div>
 
-          <el-table :data="importStats" border stripe style="width: 100%; margin-top: 16px;">
+          <el-table
+            :data="importStats"
+            row-key="rowKey"
+            :tree-props="{ children: 'children' }"
+            border
+            stripe
+            style="width: 100%; margin-top: 16px;"
+          >
             <el-table-column prop="component" label="组件" width="120" align="center" v-if="false" />
-            <el-table-column prop="function" label="功能/步骤" min-width="200" />
-            <el-table-column prop="count" label="案例数" width="100" align="center" />
+            <el-table-column prop="function" label="功能/步骤" min-width="220">
+              <template #default="{ row }">
+                <span>{{ row.function }}</span>
+                <el-tag v-if="row.category === 'rule_alias'" size="small" type="info" class="alias-tag">规则简称</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="案例数" width="110" align="center">
+              <template #default="{ row }">
+                <el-tooltip
+                  v-if="row.category !== 'rule_alias' && row.alias_count > 0"
+                  :content="`功能步骤案例 ${row.count} 条，规则简称案例 ${row.alias_count} 条（展开查看），合计 ${row.count + row.alias_count} 条`"
+                  placement="top"
+                >
+                  <span>{{ row.count }} <span class="alias-extra">+{{ row.alias_count }}</span></span>
+                </el-tooltip>
+                <span v-else>{{ row.count }}</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="process" label="流程" width="80" align="center" />
             <el-table-column prop="rule" label="规则" width="80" align="center" />
             <el-table-column prop="page_control" label="页面" width="100" align="center" />
@@ -391,49 +418,140 @@ const typeLabelMap = {
   page_control: '页面'
 }
 
+const TYPE_SEGMENTS = ['业务流程', '业务规则', '页面控制']
+
+// 解析 context 路径，定位段落节点（业务流程/业务规则/页面控制）的位置
+const resolveContextPath = (context) => {
+  const parts = context ? String(context).split(' / ').filter(Boolean) : []
+  let sectionIndex = -1
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (TYPE_SEGMENTS.includes(parts[i])) {
+      sectionIndex = i
+      break
+    }
+  }
+  return { parts, sectionIndex }
+}
+
+// 规则简称识别：优先取后端解析字段 rule_alias；
+// 兼容旧 JSON（无该字段）时，取段落节点后的第一个路径段作为简称
+const resolveRuleAlias = (point) => {
+  if (point.rule_alias) return point.rule_alias
+  const { parts, sectionIndex } = resolveContextPath(point.context || '')
+  if (sectionIndex >= 0 && sectionIndex + 1 < parts.length) {
+    return parts[sectionIndex + 1]
+  }
+  return null
+}
+
+const newStatsRow = (rowKey, name, component, category) => ({
+  rowKey,
+  function: name,
+  component: component || '',
+  category,
+  count: 0,
+  process: 0, rule: 0, page_control: 0,
+  positive: 0, negative: 0,
+  priority1: 0, priority2: 0, priority3: 0,
+  automated: 0
+})
+
+const accumulateStats = (row, point) => {
+  row.count++
+  if (row[point.point_type] !== undefined) row[point.point_type]++
+  if (point.subtype === 'positive') row.positive++
+  else if (point.subtype === 'negative') row.negative++
+  if (point.priority === 1) row.priority1++
+  else if (point.priority === 2) row.priority2++
+  else if (point.priority === 3) row.priority3++
+  if (point.is_automated) row.automated++
+}
+
+// 案例统计：功能/步骤为主行，规则简称（带"联系"标注）归属其下，
+// 作为可展开的子行（tree 表格，默认收起），统计上与功能步骤分开计数
 const importStats = computed(() => {
   const points = importedPoints.value
   if (!points.length) return []
   const groups = {}
+  const groupOrder = []
+
+  const ensureGroup = (groupKey, component) => {
+    if (!groups[groupKey]) {
+      const row = newStatsRow(`g_${groupOrder.length}_${groupKey}`, groupKey, component, 'function_step')
+      row.alias_count = 0
+      row._aliases = {}
+      groups[groupKey] = row
+      groupOrder.push(groupKey)
+    }
+    return groups[groupKey]
+  }
+
   for (const point of points) {
     const context = point.context || ''
-    const typeSuffixes = ['业务流程', '业务规则', '页面控制']
-    const pathParts = context ? context.split(' / ').filter(Boolean) : []
+    const alias = resolveRuleAlias(point)
+
     let groupKey
     let component = ''
-    if (pathParts.length >= 2) {
-      const last = pathParts[pathParts.length - 1]
-      if (typeSuffixes.includes(last)) {
-        groupKey = pathParts[pathParts.length - 2]
+    if (alias) {
+      const { parts, sectionIndex } = resolveContextPath(context)
+      if (sectionIndex >= 1) {
+        groupKey = parts[sectionIndex - 1]
+        component = parts[1] || ''
+      } else if (sectionIndex === 0) {
+        groupKey = parts[0]
+        component = parts[1] || ''
       } else {
-        groupKey = last
+        groupKey = alias
       }
-      component = pathParts[1] || ''
-    } else if (pathParts.length === 1) {
-      groupKey = pathParts[0]
     } else {
-      groupKey = typeLabelMap[point.point_type] || point.point_type || '未分类'
-    }
-    if (!groups[groupKey]) {
-      groups[groupKey] = {
-        function: groupKey, component: component, count: 0,
-        process: 0, rule: 0, page_control: 0,
-        positive: 0, negative: 0,
-        priority1: 0, priority2: 0, priority3: 0,
-        automated: 0
+      const pathParts = context ? context.split(' / ').filter(Boolean) : []
+      if (pathParts.length >= 2) {
+        const last = pathParts[pathParts.length - 1]
+        if (TYPE_SEGMENTS.includes(last)) {
+          groupKey = pathParts[pathParts.length - 2]
+        } else {
+          groupKey = last
+        }
+        component = pathParts[1] || ''
+      } else if (pathParts.length === 1) {
+        groupKey = pathParts[0]
+      } else {
+        groupKey = typeLabelMap[point.point_type] || point.point_type || '未分类'
       }
     }
-    const g = groups[groupKey]
-    g.count++
-    if (g[point.point_type] !== undefined) g[point.point_type]++
-    if (point.subtype === 'positive') g.positive++
-    else if (point.subtype === 'negative') g.negative++
-    if (point.priority === 1) g.priority1++
-    else if (point.priority === 2) g.priority2++
-    else if (point.priority === 3) g.priority3++
-    if (point.is_automated) g.automated++
+
+    const g = ensureGroup(groupKey, component)
+    if (!alias) {
+      accumulateStats(g, point)
+      continue
+    }
+
+    if (!g._aliases[alias]) {
+      g._aliases[alias] = newStatsRow(
+        `${g.rowKey}_a_${Object.keys(g._aliases).length}`,
+        alias,
+        g.component,
+        'rule_alias'
+      )
+    }
+    accumulateStats(g._aliases[alias], point)
+    g.alias_count++
   }
-  return Object.values(groups)
+
+  return groupOrder.map((key) => {
+    const g = groups[key]
+    const children = Object.values(g._aliases)
+    const row = { ...g }
+    delete row._aliases
+    if (children.length) {
+      row.children = children
+    }
+    return row
+  })
+})
+
+const importAliasTotal = computed(() => {
+  return importStats.value.reduce((sum, row) => sum + (row.alias_count || 0), 0)
 })
 
 const importTypeCounts = computed(() => {
@@ -810,12 +928,26 @@ const handleExportCsv = () => {
     ElMessage.warning('暂无统计数据可导出')
     return
   }
-  const headers = ['组件', '功能/步骤', '案例数', '流程', '规则', '页面', '正例', '反例', '优先级(高)', '优先级(中)', '优先级(低)', '自动化']
+  const headers = ['组件', '功能/步骤', '类别', '案例数', '流程', '规则', '页面', '正例', '反例', '优先级(高)', '优先级(中)', '优先级(低)', '自动化']
   const csvRows = [headers.join(',')]
+  // 展开树形结构：功能/步骤主行 + 其下规则简称子行（功能/步骤列带出归属）
+  const flatRows = []
   for (const row of rows) {
+    flatRows.push({ ...row, csvFunction: row.function || '', categoryLabel: '功能步骤' })
+    for (const child of row.children || []) {
+      flatRows.push({
+        ...child,
+        component: row.component || '',
+        csvFunction: `${row.function || ''} / ${child.function || ''}`,
+        categoryLabel: '规则简称'
+      })
+    }
+  }
+  for (const row of flatRows) {
     const values = [
       row.component || '',
-      row.function || '',
+      row.csvFunction,
+      row.categoryLabel,
       row.count,
       row.process,
       row.rule,
@@ -1072,5 +1204,14 @@ const formatTimestamp = () => {
   font-weight: 600;
   color: #303133;
   word-break: break-all;
+}
+
+.alias-tag {
+  margin-left: 8px;
+}
+
+.alias-extra {
+  color: #909399;
+  font-size: 12px;
 }
 </style>
