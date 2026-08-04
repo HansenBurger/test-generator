@@ -217,6 +217,33 @@ FRONTEND_PORT=3000
 DATA_VOLUME=backend_data
 ```
 
+### 数据库权限与表结构升级（MySQL）
+
+应用**不需要 DROP（删表）权限**。首次启动时 SQLAlchemy 会自动创建缺失的表
+（需要 CREATE 权限）；版本升级新增的列会自动 `ALTER TABLE ... ADD COLUMN`
+（需要 ALTER 权限）。
+
+按你的数据库账号权限，分三种情况：
+
+| 情况 | 需要做什么 |
+| --- | --- |
+| 全新库（还没建过表），账号有 CREATE 权限 | 不用管，启动时自动建表（已含全部新列） |
+| 旧版本已建过表，账号有 ALTER 权限 | 不用管，升级后首次启动自动补列 |
+| 旧版本已建过表，账号只有增删改查权限 | 需要请 DBA 手动执行一次下方 SQL |
+
+若账号无 ALTER 权限，启动日志会打印 WARNING 及需要手动执行的 SQL。
+**注意：补列完成前不要升级到新版本**，否则 XMind 解析接口会因缺少
+`is_invalid` 列而报错。手动补列 SQL：
+
+```sql
+ALTER TABLE parse_records ADD COLUMN is_invalid BOOLEAN;
+ALTER TABLE parse_records ADD COLUMN invalidated_at DATETIME;
+```
+
+（历史上还可能需要的模型配置补列，若库是从更早版本升级且未执行过：
+`ALTER TABLE model_config ADD COLUMN temperature FLOAT;`
+`ALTER TABLE model_config ADD COLUMN model_mode VARCHAR(16);`）
+
 ---
 
 ## 验证与访问
