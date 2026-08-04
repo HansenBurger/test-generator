@@ -469,10 +469,24 @@ update_backend_code() {
 
     if [ -f "backend-code.tar.gz" ]; then
         print_step "解压后端代码..."
+        local backup_dir=""
         if [ -d "backend" ]; then
-            mv backend backend.backup.$(date +%Y%m%d_%H%M%S)
+            backup_dir="backend.backup.$(date +%Y%m%d_%H%M%S)"
+            mv backend "$backup_dir"
+            print_info "旧代码已备份到: $backup_dir"
         fi
         tar -xzf backend-code.tar.gz
+        # 代码包打包时排除了 backend/data（数据库/解析缓存不随代码包传输），
+        # 解压后需把旧目录的 data 沿用回新目录，否则数据会留在备份目录里
+        if [ -n "$backup_dir" ] && [ -d "$backup_dir/data" ]; then
+            if [ -e "backend/data" ]; then
+                # 代码包内意外包含了 data：以内网本地数据为准，包内 data 挪到一边（不删除）
+                mv backend/data "backend/data.from-package.$(date +%Y%m%d_%H%M%S)"
+                print_warn "代码包内包含 data 目录，已让位于本地数据（挪至 backend/data.from-package.*）"
+            fi
+            mv "$backup_dir/data" backend/data
+            print_info "已从备份目录沿用数据目录: backend/data（数据库与解析缓存不受影响）"
+        fi
     fi
 
     print_step "重启后端容器（代码通过 volume mount 更新）..."

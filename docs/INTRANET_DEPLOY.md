@@ -150,6 +150,10 @@
 > **原理：** docker-compose 通过 volume mount 将 `./backend` 挂载到容器内 `/app`。
 > 更新代码后只需 `docker compose restart backend`，无需重建镜像。
 
+> **数据沿用：** 更新时旧 `backend/` 会先备份到 `backend.backup.<时间戳>/`，
+> 代码包不含 `backend/data`（数据库与解析缓存不随包传输），脚本会自动把旧目录的
+> `data/` 沿用回新 `backend/`，无需手动搬运。
+
 ---
 
 ## 方式六：后端基础镜像更新（仅依赖变更时）
