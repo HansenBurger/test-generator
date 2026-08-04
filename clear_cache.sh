@@ -40,11 +40,16 @@ if [ "$MODE" = "soft" ]; then
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         if [ -x "$VENV_PYTHON" ]; then
-            PYTHON_BIN="$VENV_PYTHON"
+            "$VENV_PYTHON" "$SCRIPT_DIR/scripts/invalidate_parse_cache.py"
+        elif python3 -c "import sqlalchemy" 2>/dev/null; then
+            python3 "$SCRIPT_DIR/scripts/invalidate_parse_cache.py"
+        elif docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^test-generator-backend$'; then
+            # 宿主机无 Python 依赖（内网 docker 部署常见）：复用后端容器环境执行软失效
+            docker exec test-generator-backend python -c "from app.db import init_db; from app.db import repository; init_db(); n = repository.invalidate_all_parse_records(); print('✓ 已将 %d 条解析记录标记为失效' % n if n else '✓ 没有可失效的解析记录')"
         else
-            PYTHON_BIN="python3"
+            print_error "未找到可用执行环境：需要 backend/.venv、带 sqlalchemy 的 python3，或运行中的 backend 容器"
+            exit 1
         fi
-        "$PYTHON_BIN" "$SCRIPT_DIR/scripts/invalidate_parse_cache.py"
         echo ""
         echo "清理完成！重新上传 XMind 文件将会重新解析。"
     else

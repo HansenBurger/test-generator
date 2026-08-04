@@ -178,6 +178,41 @@
 
 ---
 
+## 组合：代码级增量更新（前后端都只改代码、无新增依赖时推荐）
+
+不需要更新全量镜像/基础镜像，组合 **方式五 + 方式二** 即可（两个包合计约几MB）：
+
+### 1. 外网侧：打包
+
+```bash
+./deploy.sh export-backend-code   # 产物 backend-code.tar.gz
+./deploy.sh export-dist           # 产物 frontend-dist.tar.gz
+```
+
+### 2. 内网侧：更新（把两个包拷到项目根目录后）
+
+```bash
+# 0) 仅从旧版本升级且 MySQL 账号无 ALTER 权限时需要：
+#    先请 DBA 执行补列 SQL（见"数据库权限与表结构升级"），有 ALTER 权限则跳过
+# 1) 后端：自动备份旧代码、自动沿用 data 目录、自动重启容器
+./deploy.sh update-backend-code
+# 2) 前端：热更新 dist
+./deploy.sh update-dist
+# 3) 解析逻辑有变化时：软失效解析缓存，让重新上传走新解析（可选）
+./clear_cache.sh
+```
+
+> `clear_cache.sh` 在无宿主机 Python 依赖时会自动改用 backend 容器执行；
+> 只打无效标志，不删数据。
+
+### 3. 验证
+
+```bash
+./deploy.sh status
+```
+
+---
+
 ## 环境配置 (.env)
 
 将 `.env.example` 复制为 `.env` 并按需修改：
