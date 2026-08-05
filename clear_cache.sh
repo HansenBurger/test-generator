@@ -39,15 +39,16 @@ if [ "$MODE" = "soft" ]; then
     read -p "是否将所有解析记录标记为无效？(y/N): " -n 1 -r
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        if [ -x "$VENV_PYTHON" ]; then
+        # 优先在 backend 容器内执行：容器服务的数据库（数据卷/MySQL）才是线上库；
+        # 宿主机 venv 指向宿主机 backend/data/app.db，docker 部署时两者并非同一个库
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^test-generator-backend$'; then
+            docker exec test-generator-backend python -c "from app.db import init_db; from app.db import repository; init_db(); n = repository.invalidate_all_parse_records(); print('✓ 已将 %d 条解析记录标记为失效' % n if n else '✓ 没有可失效的解析记录')"
+        elif [ -x "$VENV_PYTHON" ]; then
             "$VENV_PYTHON" "$SCRIPT_DIR/scripts/invalidate_parse_cache.py"
         elif python3 -c "import sqlalchemy" 2>/dev/null; then
             python3 "$SCRIPT_DIR/scripts/invalidate_parse_cache.py"
-        elif docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^test-generator-backend$'; then
-            # 宿主机无 Python 依赖（内网 docker 部署常见）：复用后端容器环境执行软失效
-            docker exec test-generator-backend python -c "from app.db import init_db; from app.db import repository; init_db(); n = repository.invalidate_all_parse_records(); print('✓ 已将 %d 条解析记录标记为失效' % n if n else '✓ 没有可失效的解析记录')"
         else
-            print_error "未找到可用执行环境：需要 backend/.venv、带 sqlalchemy 的 python3，或运行中的 backend 容器"
+            print_error "未找到可用执行环境：需要运行中的 backend 容器、backend/.venv，或带 sqlalchemy 的 python3"
             exit 1
         fi
         echo ""
