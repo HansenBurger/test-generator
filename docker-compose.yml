@@ -3,6 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      network: host
     image: test-generator-backend:latest
     container_name: test-generator-backend
     ports:
@@ -36,6 +37,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      network: host
     image: test-generator-frontend:latest
     container_name: test-generator-frontend
     ports:

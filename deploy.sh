@@ -177,8 +177,11 @@ get_env_value() {
 build_backend_base() {
     print_step "构建后端基础镜像（包含 LibreOffice + Python 依赖）..."
     print_arch "基础镜像较大（~1-2GB），仅在依赖变更时需要重建"
-    
+
+    # --network=host：Docker 默认 bridge/NAT 网络下下载大文件（libreoffice 等
+    # deb 包）会挂起 0 字节直至超时（Connection failed），host 网络正常
     docker build \
+        --network=host \
         -f backend/Dockerfile.base \
         -t test-generator-backend-base:latest \
         backend
@@ -198,6 +201,7 @@ build_backend_app() {
     fi
     
     docker build \
+        --network=host \
         -f backend/Dockerfile \
         -t test-generator-backend:latest \
         backend
