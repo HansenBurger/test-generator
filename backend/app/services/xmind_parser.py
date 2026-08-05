@@ -362,7 +362,10 @@ class XMindParser:
         depth = self._max_effective_depth(node, point_type)
         effective_depth = max(depth - depth_offset, 0)
         if effective_depth > 3:
-            return
+            # 超三层不丢弃整条用例：按三层解析、忽略更深层级。
+            # 作者常在"预期"下挂额外备注（如"无纸化凭证吗"），若整条丢弃
+            # 会静默丢失用例（活动用例曾因此全部丢失）。
+            effective_depth = 3
 
         if effective_depth == 0 or not children:
             subtype = self._detect_subtype(cleaned_title)

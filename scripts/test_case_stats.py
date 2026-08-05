@@ -79,7 +79,10 @@ def build_fixture() -> str:
                 topic("双链校验", children=[
                     topic("前提X", markers=["priority-3"], children=[
                         topic("步骤X", children=[
-                            topic("预期X", markers=["priority-1"]),
+                            # 第四层备注：超三层截断解析，整条用例不得丢弃
+                            topic("预期X", markers=["priority-1"], children=[
+                                topic("无纸化凭证吗"),
+                            ]),
                         ]),
                     ]),
                     topic("前提Y", children=[
@@ -198,6 +201,9 @@ def main() -> int:
 
         mx = [p for p in pts if p.manual_case and "双链校验" in p.text and p.preconditions == ["前提X"]]
         my = [p for p in pts if p.manual_case and "双链校验" in p.text and p.preconditions == ["前提Y"]]
+        # 第四层备注被截断忽略，用例仍保留且优先级取预期(1)
+        check("超三层截断不丢弃用例", len(mx) == 1 and mx[0].priority == 1 and mx[0].expected_results == ["预期X"],
+              f"got={[(x.priority, x.expected_results) for x in mx]}")
         check("多链X: 预期(1)覆盖前提(3)", len(mx) == 1 and mx[0].priority == 1,
               f"got={[(x.priority, x.preconditions) for x in mx]}")
         check("多链Y: 仅步骤标注(2)", len(my) == 1 and my[0].priority == 2,
