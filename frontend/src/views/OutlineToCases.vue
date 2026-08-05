@@ -505,6 +505,7 @@ const importStats = computed(() => {
       } else {
         groupKey = alias
       }
+      displayName = groupKey
     } else {
       const pathParts = context ? context.split(' / ').filter(Boolean) : []
       if (pathParts.length >= 2) {
