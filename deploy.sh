@@ -73,52 +73,65 @@ check_docker_compose() {
 # 配置Docker镜像加速
 configure_docker_mirror() {
     print_info "配置Docker镜像加速..."
-    
+
     DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
-    MIRROR_URL="https://5f4mc5ba.mirror.aliyuncs.com"
-    
-    # 检查是否已配置
+    # 阿里云加速器为主，DaoCloud 公共镜像兜底（docker.io 直连经常超时）
+    MIRROR_URLS="https://5f4mc5ba.mirror.aliyuncs.com https://docker.m.daocloud.io"
+
+    local all_present=true
     if [ -f "$DOCKER_DAEMON_JSON" ]; then
-        if grep -q "$MIRROR_URL" "$DOCKER_DAEMON_JSON" 2>/dev/null; then
+        for u in $MIRROR_URLS; do
+            grep -q "$u" "$DOCKER_DAEMON_JSON" 2>/dev/null || all_present=false
+        done
+        if $all_present; then
             print_info "Docker镜像加速已配置"
             return
         fi
     fi
-    
+
     # 创建或更新daemon.json
     if [ ! -f "$DOCKER_DAEMON_JSON" ]; then
         sudo mkdir -p /etc/docker
         echo "{}" | sudo tee "$DOCKER_DAEMON_JSON" > /dev/null
     fi
-    
+
     # 备份原配置
     sudo cp "$DOCKER_DAEMON_JSON" "${DOCKER_DAEMON_JSON}.bak.$(date +%Y%m%d_%H%M%S)"
-    
+
     # 添加镜像加速配置
-    sudo python3 << PYBLOCK
+    sudo MIRROR_URLS="$MIRROR_URLS" DOCKER_DAEMON_JSON="$DOCKER_DAEMON_JSON" python3 << 'PYBLOCK'
 import json
-import sys
+import os
+
+path = os.environ['DOCKER_DAEMON_JSON']
+mirrors = os.environ['MIRROR_URLS'].split()
 
 try:
-    with open('$DOCKER_DAEMON_JSON', 'r') as f:
+    with open(path, 'r') as f:
         config = json.load(f)
-except:
+except Exception:
     config = {}
 
-if 'registry-mirrors' not in config:
-    config['registry-mirrors'] = []
+existing = config.get('registry-mirrors', [])
+for m in mirrors:
+    if m not in existing:
+        existing.append(m)
+config['registry-mirrors'] = existing
 
-if '$MIRROR_URL' not in config['registry-mirrors']:
-    config['registry-mirrors'].append('$MIRROR_URL')
-
-with open('$DOCKER_DAEMON_JSON', 'w') as f:
+with open(path, 'w') as f:
     json.dump(config, f, indent=2, ensure_ascii=False)
 
-print("配置已更新")
+print("配置已更新:", existing)
 PYBLOCK
-    
-    print_info "Docker镜像加速配置已添加，需要重启Docker服务"
-    print_warn "请运行以下命令重启Docker: sudo systemctl restart docker"
+
+    # 配置变更后必须重启 daemon 才生效，否则构建仍会直连 docker.io 超时
+    print_info "Docker镜像加速配置已添加，重启Docker服务使其生效..."
+    if sudo systemctl restart docker 2>/dev/null || sudo service docker restart 2>/dev/null; then
+        print_info "Docker已重启，镜像加速生效"
+    else
+        print_error "自动重启Docker失败，请手动执行: sudo systemctl restart docker，然后重新运行本脚本"
+        exit 1
+    fi
 }
 
 # 检查 DASHSCOPE_API_KEY 是否已配置（.env 或环境变量）
