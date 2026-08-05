@@ -60,6 +60,21 @@ detect_compose_cmd() {
     fi
 }
 
+# 判定开发环境：存在前端源码（内网部署目录只有 dist 没有 src，不会命中）
+is_dev_env() {
+    [ -d "frontend/src" ] && [ -f "frontend/package.json" ]
+}
+
+# compose 文件参数：开发环境且 dist 已构建时，叠加 dev override 挂载前端产物；
+# 要求 dist 存在才启用，避免首次挂载空目录导致前端空白
+compose_files() {
+    local files="-f docker-compose.yml"
+    if is_dev_env && [ -f "frontend/dist/index.html" ] && [ -f "docker-compose.dev.yml" ]; then
+        files="$files -f docker-compose.dev.yml"
+    fi
+    echo "$files"
+}
+
 # 检查Docker Compose是否安装
 check_docker_compose() {
     COMPOSE_CMD=$(detect_compose_cmd)
@@ -214,7 +229,7 @@ build_backend_app() {
 build_frontend() {
     print_step "构建前端镜像..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD build frontend
+    $COMPOSE_CMD $(compose_files) build frontend
     print_info "前端镜像构建完成"
 }
 
@@ -244,7 +259,7 @@ start_services() {
     fi
     print_info "启动服务..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD up -d
+    $COMPOSE_CMD $(compose_files) up -d
     print_info "服务启动完成"
 }
 
@@ -255,7 +270,7 @@ start_services_no_build() {
     fi
     print_info "启动服务（不构建镜像）..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD up -d --no-build
+    $COMPOSE_CMD $(compose_files) up -d --no-build
     print_info "服务启动完成"
 }
 
@@ -263,7 +278,7 @@ start_services_no_build() {
 stop_services() {
     print_info "停止服务..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD down
+    $COMPOSE_CMD $(compose_files) down
     print_info "服务已停止"
 }
 
@@ -271,7 +286,7 @@ stop_services() {
 restart_services() {
     print_info "重启服务..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD restart
+    $COMPOSE_CMD $(compose_files) restart
     print_info "服务重启完成"
 }
 
@@ -330,7 +345,7 @@ import_frontend() {
     docker load -i test-generator-frontend.tar
     print_step "重启前端容器..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD up -d --no-deps --force-recreate frontend
+    $COMPOSE_CMD $(compose_files) up -d --no-deps --force-recreate frontend
     print_info "前端更新完成！"
 }
 
@@ -456,7 +471,7 @@ import_backend() {
     docker load -i test-generator-backend.tar
     print_step "重启后端容器..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD up -d --no-deps --force-recreate backend
+    $COMPOSE_CMD $(compose_files) up -d --no-deps --force-recreate backend
     print_info "后端更新完成！"
 }
 
@@ -510,8 +525,35 @@ update_backend_code() {
 
     print_step "重启后端容器（代码通过 volume mount 更新）..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD restart backend
+    $COMPOSE_CMD $(compose_files) restart backend
     print_info "后端代码更新完成！（无需重建镜像）"
+}
+
+# ══════════════════════════════════════════════
+# 开发机增量更新（不构建镜像）
+# ══════════════════════════════════════════════
+
+# 开发机：不构建任何镜像，保证前后端都运行最新代码
+# - 前端：宿主机构建 dist，经 dev override 挂载进容器，重建容器也不丢失
+# - 后端：代码本就 volume 挂载，重启容器加载新代码
+dev_update() {
+    if ! is_dev_env; then
+        print_error "dev-update 仅用于开发环境（未检测到 frontend/src）"
+        exit 1
+    fi
+    print_step "构建前端 dist（容器经挂载直接生效，重建不丢失）..."
+    if [ ! -d "frontend/node_modules" ]; then
+        (cd frontend && npm ci --prefer-offline --no-audit)
+    fi
+    (cd frontend && npm run build)
+
+    COMPOSE_CMD=$(detect_compose_cmd)
+    print_step "同步容器配置（首次将前端切换为 dist 挂载）..."
+    $COMPOSE_CMD $(compose_files) up -d
+
+    print_step "重启后端容器（代码 volume 挂载，重启加载新代码）..."
+    $COMPOSE_CMD $(compose_files) restart backend
+    print_info "开发机更新完成：前后端均为最新代码，未构建镜像"
 }
 
 # ══════════════════════════════════════════════
@@ -522,14 +564,14 @@ update_backend_code() {
 view_logs() {
     print_info "查看服务日志..."
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD logs -f
+    $COMPOSE_CMD $(compose_files) logs -f
 }
 
 # 查看状态
 view_status() {
     print_info "服务状态:"
     COMPOSE_CMD=$(detect_compose_cmd)
-    $COMPOSE_CMD ps
+    $COMPOSE_CMD $(compose_files) ps
 }
 
 # 清理
@@ -539,7 +581,7 @@ clean() {
     if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
         print_info "清理中..."
         COMPOSE_CMD=$(detect_compose_cmd)
-        $COMPOSE_CMD down -v --rmi all
+        $COMPOSE_CMD $(compose_files) down -v --rmi all
         docker rmi test-generator-backend-base:latest 2>/dev/null || true
         print_info "清理完成"
     else
@@ -620,6 +662,7 @@ show_menu() {
     echo "19. 导入后端应用镜像并更新"
     echo "20. 导出后端代码 (~72KB，推荐)"
     echo "21. 更新后端代码（热更新，推荐）"
+    echo "22. 开发机增量更新（不构建镜像，前后端最新）"
     echo ""
     echo "99. 查看镜像架构说明"
     echo "0.  退出"
@@ -715,6 +758,9 @@ main() {
         update-backend-code)
             update_backend_code
             ;;
+        dev-update)
+            dev_update
+            ;;
         architecture)
             show_architecture
             ;;
@@ -758,6 +804,7 @@ main() {
                     19) import_backend ;;
                     20) export_backend_code ;;
                     21) update_backend_code ;;
+                    22) dev_update ;;
                     99) show_architecture ;;
                     0)  print_info "退出"; exit 0 ;;
                     *)  print_error "无效选择，请重新输入" ;;

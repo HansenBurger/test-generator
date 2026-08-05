@@ -1,0 +1,7 @@
+# 开发环境专用 override（内网部署目录无 frontend/src，deploy.sh 不会启用本文件）
+# 将前端构建产物直接挂载进容器：宿主机 npm run build 后立即生效，
+# 容器重建/重新创建也不会回滚（替代 docker cp 热补）
+services:
+  frontend:
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
