@@ -302,7 +302,11 @@
             </div>
             <div class="summary-item">
               <div class="summary-label">功能/步骤数</div>
-              <div class="summary-value">{{ importStats.length }}</div>
+              <div class="summary-value">{{ importFunctionGroupCount }}</div>
+            </div>
+            <div class="summary-item">
+              <div class="summary-label">活动案例</div>
+              <div class="summary-value">{{ importActivityTotal }}</div>
             </div>
             <div class="summary-item">
               <div class="summary-label">规则简称案例</div>
@@ -333,6 +337,7 @@
               <template #default="{ row }">
                 <span>{{ row.function }}</span>
                 <el-tag v-if="row.category === 'rule_alias'" size="small" type="info" class="alias-tag">规则简称</el-tag>
+                <el-tag v-else-if="row.category === 'activity'" size="small" type="warning" class="alias-tag">活动</el-tag>
               </template>
             </el-table-column>
             <el-table-column prop="count" label="案例数" width="100" align="center" />
@@ -465,9 +470,9 @@ const importStats = computed(() => {
   const groups = {}
   const groupOrder = []
 
-  const ensureGroup = (groupKey, component) => {
+  const ensureGroup = (groupKey, displayName, component, category) => {
     if (!groups[groupKey]) {
-      const row = newStatsRow(`g_${groupOrder.length}_${groupKey}`, groupKey, component, 'function_step')
+      const row = newStatsRow(`g_${groupOrder.length}_${groupKey}`, displayName, component, category)
       row._aliases = {}
       groups[groupKey] = row
       groupOrder.push(groupKey)
@@ -478,10 +483,18 @@ const importStats = computed(() => {
   for (const point of points) {
     const context = point.context || ''
     const alias = resolveRuleAlias(point)
+    const activity = point.activity || null
 
     let groupKey
+    let displayName
     let component = ''
-    if (alias) {
+    let category = 'function_step'
+    if (activity) {
+      // 活动（建模需求根节点直挂段落）独立成组，不与同名功能/步骤组合并
+      groupKey = `活动::${activity}`
+      displayName = activity
+      category = 'activity'
+    } else if (alias) {
       const { parts, sectionIndex } = resolveContextPath(context)
       if (sectionIndex >= 1) {
         groupKey = parts[sectionIndex - 1]
@@ -507,9 +520,10 @@ const importStats = computed(() => {
       } else {
         groupKey = typeLabelMap[point.point_type] || point.point_type || '未分类'
       }
+      displayName = groupKey
     }
 
-    const g = ensureGroup(groupKey, component)
+    const g = ensureGroup(groupKey, displayName, component, category)
     // 主行（功能/步骤）合计全部案例（含其下规则简称），
     // 案例数与流程/规则/页面/正例/反例/优先级/自动化均为总数
     accumulateStats(g, point)
@@ -542,6 +556,18 @@ const importStats = computed(() => {
     }
     return row
   })
+})
+
+// 功能/步骤组数（不含活动组）
+const importFunctionGroupCount = computed(() => {
+  return importStats.value.filter((row) => row.category !== 'activity').length
+})
+
+// 活动案例数（活动组合计）
+const importActivityTotal = computed(() => {
+  return importStats.value
+    .filter((row) => row.category === 'activity')
+    .reduce((sum, row) => sum + row.count, 0)
 })
 
 // 规则简称案例数（子行合计，仅业务规则案例）
@@ -939,12 +965,12 @@ const csvEscape = (v) => {
   return s
 }
 
-// withAliases=false：仅功能/步骤行；true：功能/步骤行 + 规则简称子行（全展开）
+const CATEGORY_LABELS = { function_step: '功能步骤', activity: '活动', rule_alias: '规则简称' }
+
+// withAliases=false：汇总行（功能/步骤 + 活动）；true：再展开规则简称子行
 const buildStatsCsv = (rows, withAliases) => {
   const statHeaders = ['案例数', '流程', '规则', '页面', '正例', '反例', '优先级(高)', '优先级(中)', '优先级(低)', '自动化']
-  const headers = withAliases
-    ? ['组件', '功能/步骤', '类别', ...statHeaders]
-    : ['组件', '功能/步骤', ...statHeaders]
+  const headers = ['组件', '功能/步骤', '类别', ...statHeaders]
   const statValues = (row) => [
     row.count, row.process, row.rule, row.page_control,
     row.positive, row.negative,
@@ -954,13 +980,13 @@ const buildStatsCsv = (rows, withAliases) => {
   const lines = [headers.join(',')]
   for (const row of rows) {
     const base = [row.component || '', row.function || '']
-    lines.push((withAliases ? [...base, '功能步骤', ...statValues(row)] : [...base, ...statValues(row)]).map(csvEscape).join(','))
+    lines.push([...base, CATEGORY_LABELS[row.category] || row.category, ...statValues(row)].map(csvEscape).join(','))
     if (withAliases) {
       for (const child of row.children || []) {
         lines.push([
           row.component || '',
           `${row.function || ''} / ${child.function || ''}`,
-          '规则简称',
+          CATEGORY_LABELS[child.category] || child.category,
           ...statValues(child)
         ].map(csvEscape).join(','))
       }
@@ -1094,11 +1120,11 @@ const handleExportCsv = () => {
   //  1) 仅功能/步骤（数量为含规则简称的合计）
   //  2) 全展开（功能/步骤 + 规则简称子行）
   const zipBytes = buildZip([
-    { name: `${baseName}_仅功能步骤_${ts}.csv`, data: encoder.encode(buildStatsCsv(rows, false)) },
-    { name: `${baseName}_含规则简称全展开_${ts}.csv`, data: encoder.encode(buildStatsCsv(rows, true)) }
+    { name: `${baseName}_功能步骤与活动汇总_${ts}.csv`, data: encoder.encode(buildStatsCsv(rows, false)) },
+    { name: `${baseName}_全展开含规则简称_${ts}.csv`, data: encoder.encode(buildStatsCsv(rows, true)) }
   ])
   downloadBlob(new Blob([zipBytes], { type: 'application/zip' }), `${baseName}_案例统计_${ts}.zip`)
-  ElMessage.success('已导出压缩包：含 仅功能步骤 与 含规则简称全展开 两份 CSV')
+  ElMessage.success('已导出压缩包：含 功能步骤与活动汇总 与 全展开含规则简称 两份 CSV')
 }
 
 onBeforeUnmount(() => {

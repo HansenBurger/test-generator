@@ -131,6 +131,7 @@ class TestPoint(BaseModel):
     manual_case: bool = False
     is_automated: bool = False
     rule_alias: Optional[str] = None  # 归属的规则简称（带"联系"标注的节点标题），None 表示归属功能步骤
+    activity: Optional[str] = None  # 归属的活动名称（建模需求：根节点直挂段落节点的活动），None 表示组件/功能步骤
 
 
 class ParsedXmindDocument(BaseModel):

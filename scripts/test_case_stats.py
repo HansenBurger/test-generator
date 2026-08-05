@@ -45,7 +45,7 @@ def topic(title, markers=None, children=None):
 def build_fixture() -> str:
     root = topic("REQ001-用例统计验证需求", children=[
         topic("基础信息", children=[topic("客户：测试客户")]),
-        topic("组件A", children=[
+        topic("功能A", children=[
             topic("业务规则", children=[
                 # 场景1/2：父 priority-2；子 priority-1 覆盖；另一子无标注则继承
                 topic("录入金额", markers=["priority-2"], children=[
@@ -86,6 +86,49 @@ def build_fixture() -> str:
                         topic("步骤Y", markers=["priority-2"], children=[
                             topic("预期Y"),
                         ]),
+                    ]),
+                ]),
+            ]),
+        ]),
+    ])
+
+    content = ET.Element(f"{{{NS}}}xmap-content", {"version": "2.0"})
+    sheet = ET.SubElement(content, f"{{{NS}}}sheet", {"id": "s1"})
+    sheet.append(root)
+    st = ET.SubElement(sheet, f"{{{NS}}}title")
+    st.text = "画布 1"
+
+    xml_text = ET.tostring(content, encoding="unicode", xml_declaration=False)
+    xml_text = '<?xml version="1.0" encoding="UTF-8" standalone="no"?>' + xml_text
+
+    fd, path = tempfile.mkstemp(suffix=".xmind")
+    os.close(fd)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("content.xml", xml_text)
+    return path
+
+
+def build_modeling_fixture() -> str:
+    """建模需求结构：根节点直挂活动（段落节点）+ 组件链路"""
+    root = topic("REQ003-建模活动验证", children=[
+        topic("基础信息", children=[topic("客户：测试客户")]),
+        # 活动：根节点直挂，子节点为固定段落；活动只有业务流程用例
+        topic("生成贷款账单", children=[
+            topic("业务流程", children=[
+                topic("查询账单", markers=["priority-2"], children=[
+                    topic("查询成功", markers=["priority-1"]),
+                ]),
+            ]),
+            topic("业务规则"),
+            topic("页面控制"),
+            topic("数据验证"),
+        ]),
+        # 组件链路：组件 -> 任务 -> 步骤 -> 段落
+        topic("个人贷款", children=[
+            topic("生成贷款账单", children=[
+                topic("生成贷款账单", children=[
+                    topic("业务规则", children=[
+                        topic("校验正确"),
                     ]),
                 ]),
             ]),
@@ -166,13 +209,30 @@ def main() -> int:
         check("优先级分布",
               doc.stats["by_priority"] == {"1": 4, "2": 3, "3": 1, "unknown": 2},
               f"got={doc.stats['by_priority']}")
-
-        print()
-        print("FAILURES:", failures if failures else "无")
-        return 1 if failures else 0
     finally:
         if os.path.exists(fixture):
             os.unlink(fixture)
+
+    # ---- 建模需求：活动标记 ----
+    mfixture = build_modeling_fixture()
+    try:
+        mdoc = XMindParser(mfixture).parse()
+        check("建模文档类型识别", mdoc.document_type == "modeling", f"got={mdoc.document_type}")
+        act_pts = [p for p in mdoc.test_points if p.activity == "生成贷款账单"]
+        check("活动用例标记 activity 且仅业务流程", len(act_pts) == 1 and all(p.point_type == "process" for p in act_pts),
+              f"got={[(p.activity, p.point_type, p.text) for p in mdoc.test_points]}")
+        comp_pts = [p for p in mdoc.test_points if p.activity is None]
+        check("组件链路用例 activity 为空", len(comp_pts) == 1 and "个人贷款" in comp_pts[0].context,
+              f"got={[(p.activity, p.context) for p in comp_pts]}")
+        check("活动用例优先级传播仍生效", sorted([p.priority for p in act_pts]) == [1, 2] or
+              any(p.priority == 1 for p in act_pts), f"got={[p.priority for p in act_pts]}")
+    finally:
+        if os.path.exists(mfixture):
+            os.unlink(mfixture)
+
+    print()
+    print("FAILURES:", failures if failures else "无")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

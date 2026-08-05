@@ -59,6 +59,14 @@ class XMindParser:
         for idx, point in enumerate(test_points, start=1):
             point.point_id = f"TP{idx:03d}"
 
+        # 建模需求：根节点直挂段落节点（业务流程/业务规则/页面控制）的节点为"活动"，
+        # 其用例单独归类（context 形如 根/活动/段落[/简称]）；组件链路更深，不会命中
+        if document_type == "modeling":
+            for point in test_points:
+                parts = [t for t in (point.context or "").split(" / ") if t]
+                if len(parts) >= 3 and parts[2] in self._SECTION_TYPES:
+                    point.activity = parts[1]
+
         stats = self._build_stats(test_points, total_override=self._total_count)
         basic_info = self._extract_basic_info(root_topic)
 
