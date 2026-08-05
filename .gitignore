@@ -19,6 +19,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
+# Windows 脚本（开发默认 WSL，不再入库）
+*.bat
+*.ps1
+
 # IDE
 .vscode/
 .idea/

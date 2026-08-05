@@ -13,7 +13,14 @@
 
 ### 使用启动脚本（推荐）
 
-运行 `start.bat` 一键启动所有服务。
+开发默认在 WSL 内进行，运行 `./start-wsl.sh` 一键启动前后端：
+
+```bash
+./start-wsl.sh          # 正常启动
+./start-wsl.sh --dev    # 调试模式（热重载）
+```
+
+详见 [WSL-README.md](./WSL-README.md)。
 
 ### 手动启动
 
@@ -21,8 +28,8 @@
 
 ```bash
 cd backend
-python -m venv .venv
-.venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 python main.py
 ```
