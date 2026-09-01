@@ -324,6 +324,30 @@
             </div>
           </div>
 
+          <!-- 整份文件优先级汇总 -->
+          <div class="priority-summary-row">
+            <div class="priority-summary-item priority-high">
+              <div class="priority-summary-label">高优先级用例</div>
+              <div class="priority-summary-value">{{ importPriorityCounts.high }}</div>
+              <div class="priority-summary-percent">占比 {{ priorityPercent('high') }}%</div>
+            </div>
+            <div class="priority-summary-item priority-medium">
+              <div class="priority-summary-label">中优先级用例</div>
+              <div class="priority-summary-value">{{ importPriorityCounts.medium }}</div>
+              <div class="priority-summary-percent">占比 {{ priorityPercent('medium') }}%</div>
+            </div>
+            <div class="priority-summary-item priority-low">
+              <div class="priority-summary-label">低优先级用例</div>
+              <div class="priority-summary-value">{{ importPriorityCounts.low }}</div>
+              <div class="priority-summary-percent">占比 {{ priorityPercent('low') }}%</div>
+            </div>
+            <div v-if="importPriorityCounts.unknown > 0" class="priority-summary-item priority-unknown">
+              <div class="priority-summary-label">未标注优先级</div>
+              <div class="priority-summary-value">{{ importPriorityCounts.unknown }}</div>
+              <div class="priority-summary-percent">占比 {{ priorityPercent('unknown') }}%</div>
+            </div>
+          </div>
+
           <el-table
             :data="importStats"
             row-key="rowKey"
@@ -599,6 +623,26 @@ const importAutomationTotal = computed(() => {
   }
   return automated
 })
+
+// 整份文件优先级汇总：高/中/低 用例数（含未标注优先级）
+const importPriorityCounts = computed(() => {
+  const counts = { high: 0, medium: 0, low: 0, unknown: 0 }
+  for (const point of importedPoints.value) {
+    const p = Number(point.priority)
+    if (p === 1) counts.high++
+    else if (p === 2) counts.medium++
+    else if (p === 3) counts.low++
+    else counts.unknown++
+  }
+  return counts
+})
+
+// 各优先级占案例总数的百分比（保留一位小数）
+const priorityPercent = (key) => {
+  const total = importedPoints.value.length
+  if (!total) return '0.0'
+  return ((importPriorityCounts.value[key] / total) * 100).toFixed(1)
+}
 
 const prioritySummary = computed(() => {
   const byPriority = parsedData.value?.stats?.by_priority || {}
@@ -1356,6 +1400,75 @@ const formatTimestamp = () => {
 
 .alias-tag {
   margin-left: 8px;
+}
+
+/* 整份文件优先级汇总卡片 */
+.priority-summary-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.priority-summary-item {
+  flex: 1;
+  min-width: 140px;
+  padding: 12px 20px;
+  border-radius: 6px;
+  border-left: 4px solid transparent;
+  display: flex;
+  flex-direction: column;
+}
+
+.priority-summary-label {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.priority-summary-value {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.priority-summary-percent {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
+}
+
+.priority-high {
+  background: #fef0f0;
+  border-left-color: #f56c6c;
+}
+.priority-high .priority-summary-value {
+  color: #f56c6c;
+}
+
+.priority-medium {
+  background: #fdf6ec;
+  border-left-color: #e6a23c;
+}
+.priority-medium .priority-summary-value {
+  color: #e6a23c;
+}
+
+.priority-low {
+  background: #f0f9eb;
+  border-left-color: #67c23a;
+}
+.priority-low .priority-summary-value {
+  color: #67c23a;
+}
+
+.priority-unknown {
+  background: #f4f4f5;
+  border-left-color: #909399;
+}
+.priority-unknown .priority-summary-value {
+  color: #909399;
 }
 
 </style>
